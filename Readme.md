@@ -45,6 +45,7 @@ On-the-move Functionality
 
 LoRa
   OTAA Mode (OFF=0 / ON=1)   (otaa=): 0
+  Try saved OTAA session     (otas=): 1
   Retry conn. (OFF=0 / ON=1) (retry=): 0
   ADR (OFF=0 / ON=1)         (adr=): 1
   ACK (OFF=0 / ON=1)         (ack=): 0
@@ -97,6 +98,8 @@ The Lora frame contains the following data. The minimum frame size is 21 bytes, 
 
 The LoRa communication only starts if the keys are not 0 (0 is the default)
 If 'Retry conn.' is on, then in case the connection to the network is not successful (useful for OTAA), the application will retry to connect the next time there is a pending transmission.
+
+If OTAA session reuse is enabled (`otas=1`), the device will only skip the join at boot after at least one successful OTAA join has previously been completed on that device.
 
 #### Temperature
 
@@ -173,4 +176,3 @@ INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN
 CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
 ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
 POSSIBILITY OF SUCH DAMAGE.
-

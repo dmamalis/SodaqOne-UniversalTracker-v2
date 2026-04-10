@@ -40,7 +40,8 @@ LoRaHelper::LoRaHelper() :
     _retransmissionPacketSize(0),
     _retransmissionOverrideLoRaPort(-1),
     _lastTransmissionAttemptTimestamp(0),
-    _getNow(0)
+    _getNow(0),
+    _joinSuccessCallback(0)
 {
 }
 
@@ -267,6 +268,10 @@ bool LoRaHelper::join()
 
     if (result) {
         _isInitialized = true;
+
+        if (_isOtaaOn && _joinSuccessCallback) {
+            _joinSuccessCallback();
+        }
 
         if (!_isAdrOn) {
             _rn2483->setSpreadingFactor(_spreadingFactor);

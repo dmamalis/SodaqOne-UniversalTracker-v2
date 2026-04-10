@@ -152,6 +152,7 @@ void updateConfigOverTheAir(const uint8_t* buffer, uint16_t size);
 void getHWEUI();
 void setDevAddrOrEUItoHWEUI();
 void onConfigReset(void);
+void onOtaaJoinSuccess(void);
 void setupBOD33();
 
 static void printCpuResetCause(Stream& stream);
@@ -216,7 +217,10 @@ void setup()
         isGpsInitialized = initGps();
     }
 
-    initLora(LORA_INIT_SHOW_CONSOLE_MESSAGES, LORA_INIT_JOIN);
+    bool shouldTryPersistedOtaaSession = params.getIsOtaaEnabled()
+        && params.getTryPersistedOtaaSession()
+        && params.getHasOtaaJoinedBefore();
+    initLora(LORA_INIT_SHOW_CONSOLE_MESSAGES, shouldTryPersistedOtaaSession ? LORA_INIT_SKIP_JOIN : LORA_INIT_JOIN);
     if (params.getAccelerationPercentage() > 0) {
         initOnTheMove();
 
@@ -430,18 +434,22 @@ bool initLora(LoraInitConsoleMessages messages, LoraInitJoin join)
     }
 
     bool result;
+    bool shouldTryPersistedOtaaSession = params.getIsOtaaEnabled()
+        && params.getTryPersistedOtaaSession()
+        && params.getHasOtaaJoinedBefore();
 
     LORA_STREAM.begin(LoRaBee.getDefaultBaudRate());
-    result = LoRaBee.init(LORA_STREAM, LORA_RESET);
+    result = LoRaBee.init(LORA_STREAM, LORA_RESET, !shouldTryPersistedOtaaSession);
     LoRaBee.setReceiveCallback(updateConfigOverTheAir);
     LoRa.init(LoRaBee, getNow);
+    LoRa.setJoinSuccessCallback(onOtaaJoinSuccess);
 
     // set keys and parameters
     LoRa.setKeys(params.getDevAddrOrEUI(), params.getAppSKeyOrEUI(), params.getNwSKeyOrAppKey());
     LoRa.setOtaaOn(params.getIsOtaaEnabled());
     LoRa.setAdrOn(params.getIsAdrOn());
     LoRa.setAckOn(params.getIsAckOn());
-    LoRa.setReconnectOnTransmissionOn(params.getShouldRetryConnectionOnSend());
+    LoRa.setReconnectOnTransmissionOn(params.getShouldRetryConnectionOnSend() || shouldTryPersistedOtaaSession);
     LoRa.setDefaultLoRaPort(params.getLoraPort());
     LoRa.setRepeatTransmissionCount(params.getRepeatCount());
     LoRa.setSpreadingFactor(params.getSpreadingFactor());
@@ -458,6 +466,9 @@ bool initLora(LoraInitConsoleMessages messages, LoraInitJoin join)
                 consolePrintln("LoRa initialization failed!");
             }
         }
+    }
+    else if (messages == LORA_INIT_SHOW_CONSOLE_MESSAGES && shouldTryPersistedOtaaSession) {
+        consolePrintln("LoRa initialized without join (trying persisted OTAA session).");
     }
 
     LoRa.setActive(false); // make sure it is off
@@ -1088,6 +1099,14 @@ void onConfigReset(void)
     params._isDebugOn = true;
 #endif
 
+}
+
+void onOtaaJoinSuccess(void)
+{
+    if (!params.getHasOtaaJoinedBefore()) {
+        params._hasOtaaJoinedBefore = 1;
+        params.commit(true);
+    }
 }
 
 void getHWEUI()

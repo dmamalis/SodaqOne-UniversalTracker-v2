@@ -98,7 +98,7 @@ void Sodaq_RN2483::fillVersionFromReceivedBuffer()
 // Takes care of the init tasks common to both initOTA() and initABP.
 // If hardware reset is available, the module is re-set, otherwise it is woken up if possible.
 // Returns true if the module replies to a device reset command.
-bool Sodaq_RN2483::init(SerialType& stream, int8_t resetPin)
+bool Sodaq_RN2483::init(SerialType& stream, int8_t resetPin, bool performReset)
 {
     debugPrintLn("[init]");
 
@@ -120,6 +120,14 @@ bool Sodaq_RN2483::init(SerialType& stream, int8_t resetPin)
     }
 
 #endif
+
+    if (!performReset) {
+        // just wake the module and continue with the current state/session
+#ifdef ENABLE_SLEEP
+        wakeUp();
+#endif
+        return true;
+    }
 
     if (isHardwareResetEnabled()) {
         hardwareReset();
