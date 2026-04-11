@@ -135,6 +135,8 @@ public:
     void    flush();
     void    reset();
     bool    exists() const;
+    bool    setPowerSaveMode(uint32_t updatePeriodMs);
+    bool    setContinuousMode();
 
     // function pointers
     void    (*funcNavPvt) (NavigationPositionVelocityTimeSolution*) = NULL;
