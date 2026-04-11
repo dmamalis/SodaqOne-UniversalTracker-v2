@@ -254,6 +254,79 @@ void UBlox::sendraw() {
     this->db_printf("UBlox::sendraw() == %4.4x\n",id);
 }
 
+/**
+ * Configures the receiver for PSM cyclic tracking mode, then enables PSM.
+ * In cyclic tracking the RF chain is duty-cycled while the receiver stays
+ * responsive on I2C and continues to accumulate ephemeris between fix events.
+ * updatePeriodMs controls how often the receiver produces a new navigation solution.
+ * Uses UBX-CFG-PM2 followed by UBX-CFG-RXM.
+ */
+void UBlox::setPowerSaveMode(uint32_t updatePeriodMs)
+{
+    // UBX-CFG-PM2: 4 header bytes + 44 payload bytes = 48 total
+    uint8_t buffer[48];
+    memset(buffer, 0, sizeof(buffer));
+
+    buffer[0] = 0x06;  // class CFG
+    buffer[1] = 0x3B;  // id PM2
+    buffer[2] = 44;    // payload length (LSB)
+    buffer[3] = 0x00;
+
+    // payload offset 0: version = 2
+    buffer[4] = 0x02;
+
+    // payload offset 4: flags = 0x00002000 (cyclic tracking, bits [14:13] = 01)
+    // little-endian: byte0=0x00, byte1=0x20, byte2=0x00, byte3=0x00
+    buffer[9] = 0x20;
+
+    // payload offset 8: updatePeriod (ms, little-endian)
+    buffer[12] = (uint8_t)(updatePeriodMs & 0xFF);
+    buffer[13] = (uint8_t)((updatePeriodMs >> 8)  & 0xFF);
+    buffer[14] = (uint8_t)((updatePeriodMs >> 16) & 0xFF);
+    buffer[15] = (uint8_t)((updatePeriodMs >> 24) & 0xFF);
+
+    // payload offset 12: searchPeriod = same as updatePeriod
+    buffer[16] = buffer[12];
+    buffer[17] = buffer[13];
+    buffer[18] = buffer[14];
+    buffer[19] = buffer[15];
+
+    // payload offset 20: onTime = 2 seconds (minimum time in tracking state per cycle)
+    buffer[24] = 0x02;
+
+    (void)this->send(buffer, sizeof(buffer));
+    this->wait();
+
+    // UBX-CFG-RXM: enable Power Save Mode
+    uint8_t rxm[6];
+    rxm[0] = 0x06;  // class CFG
+    rxm[1] = 0x11;  // id RXM
+    rxm[2] = 0x02;  // payload length
+    rxm[3] = 0x00;
+    rxm[4] = 0x08;  // reserved
+    rxm[5] = 0x01;  // lpMode = power save
+    (void)this->send(rxm, sizeof(rxm));
+    this->wait();
+}
+
+/**
+ * Returns the receiver to continuous tracking mode.
+ * Must be called before polling for a fix when the receiver is in PSM.
+ * Uses UBX-CFG-RXM.
+ */
+void UBlox::setContinuousMode()
+{
+    uint8_t rxm[6];
+    rxm[0] = 0x06;  // class CFG
+    rxm[1] = 0x11;  // id RXM
+    rxm[2] = 0x02;  // payload length
+    rxm[3] = 0x00;
+    rxm[4] = 0x08;  // reserved
+    rxm[5] = 0x00;  // lpMode = continuous
+    (void)this->send(rxm, sizeof(rxm));
+    this->wait();
+}
+
 void UBlox::CfgMsg(uint16_t Msg,uint8_t rate) {
     uint8_t buffer[7];
     //
