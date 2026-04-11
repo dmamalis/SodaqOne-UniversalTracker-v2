@@ -413,7 +413,11 @@ void transmitOnTheMove()
  */
 void transmit()
 {
-    if (isOnTheMoveActivated) {
+    // Use the compact on-the-move payload only when a valid fix was obtained.
+    // timeToFix == 0xFF is the sentinel for "no fix / stale coordinates", in
+    // which case the full record is sent so downstream consumers can detect the
+    // failure and avoid silently ingesting stale or 0,0 coordinates.
+    if (isOnTheMoveActivated && pendingReportDataRecord.getTimeToFix() != 0xFF) {
         transmitOnTheMove();
         return;
     }
