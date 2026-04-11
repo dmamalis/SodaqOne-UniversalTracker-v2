@@ -915,10 +915,17 @@ bool getGpsFixAndTransmit()
 
     // During on-the-move: put GPS into PSM cyclic tracking so it keeps ephemeris
     // alive between fix events (saving ~16 mA vs continuous).
-    // Otherwise: power GPS off completely as usual.
+    // Only treat GPS as being in PSM when the receiver acknowledged both UBX
+    // commands.  On failure, fall back to a full power-off so the next fix cycle
+    // starts clean and battery drain is bounded.
     if (isOnTheMoveActivated) {
-        ublox.setPowerSaveMode(GPS_ON_THE_MOVE_PSM_PERIOD_MS);
-        isGpsInPowerSaveMode = true;
+        if (ublox.setPowerSaveMode(GPS_ON_THE_MOVE_PSM_PERIOD_MS)) {
+            isGpsInPowerSaveMode = true;
+        }
+        else {
+            debugPrintln("GPS PSM command failed; powering off.");
+            setGpsActive(false);
+        }
     }
     else {
         setGpsActive(false);

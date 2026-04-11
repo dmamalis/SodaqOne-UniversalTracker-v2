@@ -260,8 +260,9 @@ void UBlox::sendraw() {
  * responsive on I2C and continues to accumulate ephemeris between fix events.
  * updatePeriodMs controls how often the receiver produces a new navigation solution.
  * Uses UBX-CFG-PM2 followed by UBX-CFG-RXM.
+ * Returns true only when both commands are acknowledged by the receiver.
  */
-void UBlox::setPowerSaveMode(uint32_t updatePeriodMs)
+bool UBlox::setPowerSaveMode(uint32_t updatePeriodMs)
 {
     // UBX-CFG-PM2: 4 header bytes + 44 payload bytes = 48 total
     uint8_t buffer[48];
@@ -294,8 +295,12 @@ void UBlox::setPowerSaveMode(uint32_t updatePeriodMs)
     // payload offset 20: onTime = 2 seconds (minimum time in tracking state per cycle)
     buffer[24] = 0x02;
 
-    (void)this->send(buffer, sizeof(buffer));
-    this->wait();
+    if (this->send(buffer, sizeof(buffer)) != 0) {
+        return false;  // I2C write failed
+    }
+    if (this->wait() != 0x0500) {  // 0x0500 = UBX-ACK-ACK
+        return false;  // receiver NAKed or did not respond
+    }
 
     // UBX-CFG-RXM: enable Power Save Mode
     uint8_t rxm[6];
@@ -305,16 +310,19 @@ void UBlox::setPowerSaveMode(uint32_t updatePeriodMs)
     rxm[3] = 0x00;
     rxm[4] = 0x08;  // reserved
     rxm[5] = 0x01;  // lpMode = power save
-    (void)this->send(rxm, sizeof(rxm));
-    this->wait();
+    if (this->send(rxm, sizeof(rxm)) != 0) {
+        return false;
+    }
+    return (this->wait() == 0x0500);
 }
 
 /**
  * Returns the receiver to continuous tracking mode.
  * Must be called before polling for a fix when the receiver is in PSM.
  * Uses UBX-CFG-RXM.
+ * Returns true only when the command is acknowledged by the receiver.
  */
-void UBlox::setContinuousMode()
+bool UBlox::setContinuousMode()
 {
     uint8_t rxm[6];
     rxm[0] = 0x06;  // class CFG
@@ -323,8 +331,10 @@ void UBlox::setContinuousMode()
     rxm[3] = 0x00;
     rxm[4] = 0x08;  // reserved
     rxm[5] = 0x00;  // lpMode = continuous
-    (void)this->send(rxm, sizeof(rxm));
-    this->wait();
+    if (this->send(rxm, sizeof(rxm)) != 0) {
+        return false;
+    }
+    return (this->wait() == 0x0500);
 }
 
 void UBlox::CfgMsg(uint16_t Msg,uint8_t rate) {
