@@ -97,12 +97,6 @@ POSSIBILITY OF SUCH DAMAGE.
 #define DEFAULT_IS_LED_ENABLED 1
 
 
-#ifdef DEBUG
-#define DEFAULT_IS_DEBUG_ON 1
-#else
-#define DEFAULT_IS_DEBUG_ON 0
-#endif
-
 #define GPS_TIME_VALIDITY 0b00000011 // date and time (but not fully resolved)
 #define GPS_FIX_FLAGS 0b00000001 // just gnssFixOK
 #define GPS_COMM_CHECK_TIMEOUT 3 // seconds
@@ -1247,7 +1241,11 @@ void onConfigReset(void)
     params._gpsMinSatelliteCount = DEFAULT_GPS_MIN_SATELLITE_COUNT;
     params._coordinateUploadCount = DEFAULT_COORDINATE_UPLOAD_COUNT;
     params._repeatCount = DEFAULT_REPEAT_COUNT;
-    params._isDebugOn = DEFAULT_IS_DEBUG_ON;
+#ifdef DEBUG
+    params._isDebugOn = 1;
+#else
+    params._isDebugOn = 0;
+#endif
     params._isCayennePayloadEnabled = DEFAULT_IS_CAYENNE_PAYLOAD_ENABLED;
 
 #if ENABLE_DEV_PROVISIONING
