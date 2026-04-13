@@ -71,6 +71,10 @@ void ConfigParams::read()
 
 void ConfigParams::reset()
 {
+    // Keep deterministic fallback values here; the sketch's onConfigReset()
+    // callback applies the user-editable defaults from a single place.
+    memset(this, 0, sizeof(*this));
+
     _defaultFixInterval = 15;
     _alternativeFixInterval = 0;
     _alternativeFixFromHours = 0;
@@ -97,6 +101,9 @@ void ConfigParams::reset()
     _onTheMoveTimeout = 10;
 
     _temperatureSensorOffset = 20;
+    _isLedEnabled = 0;
+    _isOtaaEnabled = 0;
+    _shouldRetryConnectionOnSend = 0;
     _loraPort = 1;
     _isAdrOn = 1;
     _isAckOn = 0;
@@ -107,6 +114,7 @@ void ConfigParams::reset()
     _isGpsOn = 1;
     _gpsMinSatelliteCount = 4;
     _isDebugOn = 0;
+    _isCayennePayloadEnabled = 0;
 
     if (configResetCallback) {
         configResetCallback();
