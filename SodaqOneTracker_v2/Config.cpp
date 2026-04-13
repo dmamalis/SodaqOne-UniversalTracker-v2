@@ -33,7 +33,7 @@ POSSIBILITY OF SUCH DAMAGE.
 #include "Command.h"
 #include "FlashStorage.h"
 
-#define DEFAULT_HEADER 0xBEEF
+#define DEFAULT_HEADER 0xBEF0
 
 ConfigParams params;
 
@@ -66,6 +66,7 @@ void ConfigParams::read()
     uint16_t calcCRC16 = crc16ccitt((uint8_t*)this, (uint32_t)&params._crc16 - (uint32_t)&params._header);
     if (_header != DEFAULT_HEADER || _crc16 != calcCRC16) {
         reset();
+        commit(true);
     }
 }
 
@@ -101,14 +102,9 @@ void ConfigParams::reset()
     _onTheMoveTimeout = 10;
 
     _temperatureSensorOffset = 20;
-    _isLedEnabled = 0;
-    _isOtaaEnabled = 0;
-    _shouldRetryConnectionOnSend = 0;
     _loraPort = 1;
     _isAdrOn = 1;
-    _isAckOn = 0;
     _tryPersistedOtaaSession = 1;
-    _hasOtaaJoinedBefore = 0;
     _spreadingFactor = 7;
     _powerIndex = 1;
     _isGpsOn = 1;

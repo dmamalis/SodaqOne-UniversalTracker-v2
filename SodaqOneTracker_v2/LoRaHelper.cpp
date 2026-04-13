@@ -149,7 +149,6 @@ uint8_t LoRaHelper::transmit(uint8_t* buffer, uint8_t size, int16_t overrideLoRa
     if (!isInitialized()) {
         // check for a retry
         if (_isReconnectOnTransmissionOn) {
-            debugPrintln("[OTAA-DBG][TX-2] LoRa not initialized; reconnect-on-transmission path is active.");
             // check if join is sucessfull before continuing
             if (!join()) {
                 debugPrintln("Failed to reconnect! Hardware-resetting the modem and scheduling a retransmission (if applicable).");
@@ -256,9 +255,6 @@ uint8_t LoRaHelper::getHWEUI(uint8_t* hweui, uint8_t size)
 bool LoRaHelper::join()
 {
     debugPrintln("Trying to join...");
-    unsigned long joinStartMillis = millis();
-    debugPrint("[OTAA-DBG][JOIN] mode=");
-    debugPrintln(_isOtaaOn ? "OTAA" : "ABP");
 
     _rn2483->wakeUp();
 
@@ -272,12 +268,6 @@ bool LoRaHelper::join()
 
     if (result) {
         _isInitialized = true;
-        debugPrint("[OTAA-DBG][JOIN] success, duration(ms)=");
-        debugPrintln((unsigned long)(millis() - joinStartMillis));
-
-        if (_isOtaaOn && _joinSuccessCallback) {
-            _joinSuccessCallback();
-        }
 
         if (_isOtaaOn && _joinSuccessCallback) {
             _joinSuccessCallback();
@@ -289,12 +279,27 @@ bool LoRaHelper::join()
 
         _rn2483->setPowerIndex(_powerIndex);
     }
-    else {
-        debugPrint("[OTAA-DBG][JOIN] failed, duration(ms)=");
-        debugPrintln((unsigned long)(millis() - joinStartMillis));
+    return result;
+}
+
+bool LoRaHelper::restoreOtaaSession()
+{
+    debugPrintln("Trying persisted OTAA session...");
+    _rn2483->wakeUp();
+
+    bool result = _rn2483->resumeSavedSession();
+    if (!result) {
+        debugPrintln("Persisted session activation failed.");
+        return false;
     }
 
-    return result;
+    _isInitialized = true;
+
+    if (!_isAdrOn) {
+        _rn2483->setSpreadingFactor(_spreadingFactor);
+    }
+
+    return _rn2483->setPowerIndex(_powerIndex);
 }
 
 void LoRaHelper::extendSleep()

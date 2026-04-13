@@ -99,7 +99,7 @@ The Lora frame contains the following data. The minimum frame size is 21 bytes, 
 The LoRa communication only starts if the keys are not 0 (0 is the default)
 If 'Retry conn.' is on, then in case the connection to the network is not successful (useful for OTAA), the application will retry to connect the next time there is a pending transmission.
 
-If OTAA session reuse is enabled (`otas=1`), the device will only skip the join at boot after at least one successful OTAA join has previously been completed on that device.
+If OTAA session reuse is enabled (`otas=1`), the device saves the RN2483 LoRaWAN MAC state to the modem's EEPROM after every successful OTAA join. On subsequent boots, the modem reloads that saved state and the device resumes the session without performing a new network join. Setting `otas=0` disables session persistence and the device follows the normal OTAA join path on boot.
 
 #### Temperature
 

@@ -48,7 +48,7 @@ POSSIBILITY OF SUCH DAMAGE.
 #include "Enums.h"
 #include "CayenneLPP.h"
 
-#define DEBUG
+// #define DEBUG
 
 #define PROJECT_NAME "SodaqOne Universal Tracker v2"
 #define VERSION "5.0.2"
@@ -56,7 +56,7 @@ POSSIBILITY OF SUCH DAMAGE.
 
 // Configuration defaults applied whenever the stored config is reset or invalid.
 
-#define DEFAULT_HAS_OTAA_JOINED_BEFORE 1
+#define DEFAULT_HAS_OTAA_JOINED_BEFORE 0
 #define DEFAULT_IS_GPS_ON 1
 
 // GPS
@@ -94,6 +94,7 @@ POSSIBILITY OF SUCH DAMAGE.
 #define DEFAULT_IS_CAYENNE_PAYLOAD_ENABLED 1
 #define DEFAULT_TEMPERATURE_SENSOR_OFFSET 20
 #define DEFAULT_IS_LED_ENABLED 1
+
 
 #ifdef DEBUG
 #define DEFAULT_IS_DEBUG_ON 1
@@ -257,10 +258,14 @@ void setup()
         isGpsInitialized = initGps();
     }
 
-    bool shouldTryPersistedOtaaSession = params.getIsOtaaEnabled()
-        && params.getTryPersistedOtaaSession()
-        && params.getHasOtaaJoinedBefore();
-    initLora(LORA_INIT_SHOW_CONSOLE_MESSAGES, shouldTryPersistedOtaaSession ? LORA_INIT_SKIP_JOIN : LORA_INIT_JOIN);
+    // When persisted-session mode is disabled, force the next boot path through
+    // a fresh OTAA join even if an older saved-session flag is still present.
+    if (!params.getTryPersistedOtaaSession() && params.getHasOtaaJoinedBefore()) {
+        params._hasOtaaJoinedBefore = 0;
+        params.commit(true);
+    }
+
+    initLora(LORA_INIT_SHOW_CONSOLE_MESSAGES, LORA_INIT_JOIN);
     if (params.getAccelerationPercentage() > 0) {
         initOnTheMove();
 
@@ -468,8 +473,6 @@ void updateConfigOverTheAir(const uint8_t* buffer, uint16_t size)
 */
 bool initLora(LoraInitConsoleMessages messages, LoraInitJoin join)
 {
-    debugPrintln("Initializing LoRa...");
-
     if (messages == LORA_INIT_SHOW_CONSOLE_MESSAGES) {
         consolePrintln("Initializing LoRa...");
     }
@@ -479,22 +482,21 @@ bool initLora(LoraInitConsoleMessages messages, LoraInitJoin join)
         LoRa.setDiag(DEBUG_STREAM);
     }
 
-    bool result;
-    bool shouldTryPersistedOtaaSession = params.getIsOtaaEnabled()
+    // Decide whether to reuse a persisted OTAA session or do a fresh join.
+    // Session reuse is only attempted when LORA_INIT_JOIN is requested; the
+    // LORA_INIT_SKIP_JOIN path (used for HWEUI reads) always does a full reset.
+    bool shouldRestoreSession = (join == LORA_INIT_JOIN)
+        && params.getIsOtaaEnabled()
         && params.getTryPersistedOtaaSession()
-        && params.getHasOtaaJoinedBefore();
+        && params.hasStoredOtaaSession();
 
-    bool performReset = !shouldTryPersistedOtaaSession;
-    bool reconnectOnTransmission = params.getShouldRetryConnectionOnSend() || shouldTryPersistedOtaaSession;
-    debugPrint("[OTAA-DBG][BOOT-3] shouldTryPersistedOtaaSession=");
-    debugPrintln(shouldTryPersistedOtaaSession);
-    debugPrint("[OTAA-DBG][INIT-1] performReset=");
-    debugPrintln(performReset);
-    debugPrint("[OTAA-DBG][TX-2] reconnectOnTransmission=");
-    debugPrintln(reconnectOnTransmission);
+    // Always perform a full hardware reset of the RN2483 module. Persisted
+    // session reuse depends on the modem reloading its saved MAC state from its
+    // own EEPROM during reset, so we intentionally start from a clean modem boot.
+    bool reconnectOnTransmission = params.getShouldRetryConnectionOnSend() || shouldRestoreSession;
 
     LORA_STREAM.begin(LoRaBee.getDefaultBaudRate());
-    result = LoRaBee.init(LORA_STREAM, LORA_RESET, performReset);
+    bool result = LoRaBee.init(LORA_STREAM, LORA_RESET);
     LoRaBee.setReceiveCallback(updateConfigOverTheAir);
     LoRa.init(LoRaBee, getNow);
     LoRa.setJoinSuccessCallback(onOtaaJoinSuccess);
@@ -511,20 +513,30 @@ bool initLora(LoraInitConsoleMessages messages, LoraInitJoin join)
     LoRa.setPowerIndex(params.getPowerIndex());
 
     if (join == LORA_INIT_JOIN) {
-        result = LoRa.join();
+        if (shouldRestoreSession) {
+            result = LoRa.restoreOtaaSession();
 
-        if (messages == LORA_INIT_SHOW_CONSOLE_MESSAGES) {
-            if (result) {
-                consolePrintln("LoRa initialized.");
+            if (messages == LORA_INIT_SHOW_CONSOLE_MESSAGES) {
+                consolePrintln(result
+                    ? "LoRa session restored."
+                    : "Persisted session restore failed; joining OTAA.");
             }
-            else {
-                consolePrintln("LoRa initialization failed!");
+
+            if (!result) {
+                result = LoRa.join();
+
+                if (messages == LORA_INIT_SHOW_CONSOLE_MESSAGES) {
+                    consolePrintln(result ? "LoRa initialized." : "LoRa initialization failed!");
+                }
             }
         }
-    }
-    else if (messages == LORA_INIT_SHOW_CONSOLE_MESSAGES && shouldTryPersistedOtaaSession) {
-        consolePrintln("LoRa initialized without join (trying persisted OTAA session).");
-        debugPrintln("[OTAA-DBG][BOOT-3] skipped join at boot due to persisted-session mode.");
+        else {
+            result = LoRa.join();
+
+            if (messages == LORA_INIT_SHOW_CONSOLE_MESSAGES) {
+                consolePrintln(result ? "LoRa initialized." : "LoRa initialization failed!");
+            }
+        }
     }
 
     LoRa.setActive(false); // make sure it is off
@@ -1187,9 +1199,33 @@ void onConfigReset(void)
 
 void onOtaaJoinSuccess(void)
 {
-    if (!params.getHasOtaaJoinedBefore()) {
+    // Only persist the session when otas=1.
+    if (!params.getTryPersistedOtaaSession()) {
+        if (params.getHasOtaaJoinedBefore()) {
+            params._hasOtaaJoinedBefore = 0;
+            params.commit(true);
+        }
+        return;
+    }
+
+    // RN2483 does not expose OTAA-derived session keys through "mac get", but
+    // it can persist the full LoRaWAN MAC state (including session keys and
+    // counters) in its own EEPROM via "mac save". On the next reset, the modem
+    // restores those parameters and we reactivate them with "mac join abp".
+    char saveResponse[32] = { 0 };
+    sodaq_wdt_safe_delay(500);
+    bool saved = LoRaBee.saveMacState(saveResponse, sizeof(saveResponse));
+
+    if (saved) {
         params._hasOtaaJoinedBefore = 1;
         params.commit(true);
+    }
+    else {
+        params._hasOtaaJoinedBefore = 0;
+        params.commit(true);
+        consolePrintln("Persisted OTAA session save failed.");
+        debugPrint("[session] mac save failed: ");
+        debugPrintln(saveResponse[0] ? saveResponse : "timeout");
     }
 }
 

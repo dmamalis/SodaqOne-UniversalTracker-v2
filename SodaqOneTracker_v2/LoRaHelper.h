@@ -48,6 +48,10 @@ public:
     bool isInitialized() { return _isInitialized; };
     uint8_t getHWEUI(uint8_t* hweui, uint8_t size);
     bool join();
+    // Reuses a previously saved OTAA session that the RN2483 restored from its
+    // own EEPROM during boot/reset. Returns false when session reactivation
+    // fails, so the caller can fall back to a fresh OTAA join.
+    bool restoreOtaaSession();
     uint8_t transmit(uint8_t* buffer, uint8_t size, int16_t overrideLoRaPort = -1);
     void extendSleep();
     void loopHandler();

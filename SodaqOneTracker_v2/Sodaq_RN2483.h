@@ -135,6 +135,14 @@ class Sodaq_RN2483
     // Returns the number of bytes written or 0 in case of error.
     uint8_t getHWEUI(uint8_t* buffer, uint8_t size);
 
+    // Saves the current LoRaWAN MAC state to the RN2483 user EEPROM.
+    // On failure, the modem's raw response line is copied into responseBuffer.
+    bool saveMacState(char* responseBuffer, uint8_t size);
+
+    // Re-enters the previously saved session by issuing "mac join abp" with the
+    // parameters that were restored from the RN2483 user EEPROM after reset.
+    bool resumeSavedSession();
+
     // Enables all the channels that belong to the given Frequency Sub-Band (FSB)
     // and disables the rest.
     // fsb is [1, 8] or 0 to enable all channels.

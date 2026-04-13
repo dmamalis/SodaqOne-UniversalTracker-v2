@@ -128,6 +128,8 @@ public:
     uint8_t getIsDebugOn() const { return _isDebugOn; }
     uint8_t getIsCayennePayloadEnabled() const { return _isCayennePayloadEnabled; }
 
+    bool hasStoredOtaaSession() const { return _hasOtaaJoinedBefore; }
+
     static void showConfig(Stream* stream);
     bool checkConfig(Stream& stream);
     void setConfigResetCallback(VoidCallbackMethodPtr callback);
