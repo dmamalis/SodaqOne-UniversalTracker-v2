@@ -13,8 +13,8 @@ enum LoraInitConsoleMessages {
 };
 
 enum LoraInitJoin {
-    LORA_INIT_SKIP_JOIN,
-    LORA_INIT_JOIN
+    LORA_INIT_SKIP_JOIN,   // module init only, no join (used for HWEUI read)
+    LORA_INIT_JOIN         // join or restore session, depending on stored state
 };
 
 #endif

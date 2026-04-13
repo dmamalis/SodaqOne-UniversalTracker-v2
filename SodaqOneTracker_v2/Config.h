@@ -57,6 +57,8 @@ struct ConfigParams
     int8_t _temperatureSensorOffset;
     uint8_t _isLedEnabled;
     uint8_t _isOtaaEnabled;
+    uint8_t _tryPersistedOtaaSession;
+    uint8_t _hasOtaaJoinedBefore;
     uint8_t _shouldRetryConnectionOnSend;
 
     char _devAddrOrEUI[16 + 1];
@@ -104,6 +106,8 @@ public:
     int8_t getTemperatureSensorOffset() const { return _temperatureSensorOffset; };
     uint8_t getIsLedEnabled() const { return _isLedEnabled; }
     uint8_t getIsOtaaEnabled() const { return _isOtaaEnabled; }
+    uint8_t getTryPersistedOtaaSession() const { return _tryPersistedOtaaSession; }
+    uint8_t getHasOtaaJoinedBefore() const { return _hasOtaaJoinedBefore; }
     uint8_t getShouldRetryConnectionOnSend() const { return _shouldRetryConnectionOnSend; }
     
     const char* getDevAddrOrEUI() const { return _devAddrOrEUI; }
@@ -123,6 +127,8 @@ public:
 
     uint8_t getIsDebugOn() const { return _isDebugOn; }
     uint8_t getIsCayennePayloadEnabled() const { return _isCayennePayloadEnabled; }
+
+    bool hasStoredOtaaSession() const { return _hasOtaaJoinedBefore; }
 
     static void showConfig(Stream* stream);
     bool checkConfig(Stream& stream);

@@ -48,18 +48,60 @@ POSSIBILITY OF SUCH DAMAGE.
 #include "Enums.h"
 #include "CayenneLPP.h"
 
-//#define DEBUG
+// #define DEBUG
 
 #define PROJECT_NAME "SodaqOne Universal Tracker v2"
 #define VERSION "5.0.2"
 #define STARTUP_DELAY 5000
 
-// #define DEFAULT_TEMPERATURE_SENSOR_OFFSET 33
-// #define DEFAULT_LORA_PORT 2
-// #define DEFAULT_IS_OTAA_ENABLED 1
-// #define DEFAULT_DEVADDR_OR_DEVEUI "0000000000000000"
-// #define DEFAULT_APPSKEY_OR_APPEUI "00000000000000000000000000000000"
-// #define DEFAULT_NWSKEY_OR_APPKEY "00000000000000000000000000000000"
+// Configuration defaults applied whenever the stored config is reset or invalid.
+
+#define DEFAULT_HAS_OTAA_JOINED_BEFORE 0
+#define DEFAULT_IS_GPS_ON 1
+
+// GPS
+#define DEFAULT_FIX_INTERVAL 2
+#define DEFAULT_ALTERNATIVE_FIX_INTERVAL 0
+#define DEFAULT_ALTERNATIVE_FIX_FROM_HOURS 0
+#define DEFAULT_ALTERNATIVE_FIX_FROM_MINUTES 0
+#define DEFAULT_ALTERNATIVE_FIX_TO_HOURS 0
+#define DEFAULT_ALTERNATIVE_FIX_TO_MINUTES 0
+#define DEFAULT_GPS_FIX_TIMEOUT 120
+#define DEFAULT_GPS_MIN_SATELLITE_COUNT 4
+#define DEFAULT_COORDINATE_UPLOAD_COUNT 1
+
+// On-the-move Functionality
+#define DEFAULT_ACCELERATION_PERCENTAGE 0
+#define DEFAULT_ACCELERATION_DURATION 0
+#define DEFAULT_ON_THE_MOVE_FIX_INTERVAL 1
+#define DEFAULT_ON_THE_MOVE_TIMEOUT 10
+
+// LoRa
+#define DEFAULT_IS_OTAA_ENABLED 1
+#define DEFAULT_TRY_PERSISTED_OTAA_SESSION 1
+#define DEFAULT_LORA_PORT 1
+#define DEFAULT_SHOULD_RETRY_CONNECTION_ON_SEND 1
+#define DEFAULT_IS_ADR_ON 0
+#define DEFAULT_IS_ACK_ON 0
+#define DEFAULT_SPREADING_FACTOR 9
+#define DEFAULT_POWER_INDEX 1
+#define ENABLE_DEV_PROVISIONING 1
+#define DEFAULT_DEVADDR_OR_DEVEUI "0004A30B001F504C"
+#define DEFAULT_APPSKEY_OR_APPEUI "5AE787EFDE8FF542"
+#define DEFAULT_NWSKEY_OR_APPKEY "20EF4D99ED4C0A30482EE5CEA003BC34"
+#define DEFAULT_REPEAT_COUNT 0
+
+// Misc
+#define DEFAULT_IS_CAYENNE_PAYLOAD_ENABLED 1
+#define DEFAULT_TEMPERATURE_SENSOR_OFFSET 20
+#define DEFAULT_IS_LED_ENABLED 1
+
+
+#ifdef DEBUG
+#define DEFAULT_IS_DEBUG_ON 1
+#else
+#define DEFAULT_IS_DEBUG_ON 0
+#endif
 
 #define GPS_TIME_VALIDITY 0b00000011 // date and time (but not fully resolved)
 #define GPS_FIX_FLAGS 0b00000001 // just gnssFixOK
@@ -152,6 +194,7 @@ void updateConfigOverTheAir(const uint8_t* buffer, uint16_t size);
 void getHWEUI();
 void setDevAddrOrEUItoHWEUI();
 void onConfigReset(void);
+void onOtaaJoinSuccess(void);
 void setupBOD33();
 
 static void printCpuResetCause(Stream& stream);
@@ -216,6 +259,13 @@ void setup()
         isGpsInitialized = initGps();
     }
 
+    // When persisted-session mode is disabled, force the next boot path through
+    // a fresh OTAA join even if an older saved-session flag is still present.
+    if (!params.getTryPersistedOtaaSession() && params.getHasOtaaJoinedBefore()) {
+        params._hasOtaaJoinedBefore = 0;
+        params.commit(true);
+    }
+
     initLora(LORA_INIT_SHOW_CONSOLE_MESSAGES, LORA_INIT_JOIN);
     if (params.getAccelerationPercentage() > 0) {
         initOnTheMove();
@@ -254,7 +304,13 @@ void setup()
         CONSOLE_STREAM.end();
     }
 
-    if (getGpsFixAndTransmit()) {
+    bool startupFixSuccessful = getGpsFixAndTransmit();
+
+    // The startup fix can take as long as the configured fix interval,
+    // which would make the first scheduled event fire immediately after boot.
+    timer.resetAll(getNow());
+
+    if (startupFixSuccessful) {
         setLedColor(GREEN);
         sodaq_wdt_safe_delay(800);
     }
@@ -418,8 +474,6 @@ void updateConfigOverTheAir(const uint8_t* buffer, uint16_t size)
 */
 bool initLora(LoraInitConsoleMessages messages, LoraInitJoin join)
 {
-    debugPrintln("Initializing LoRa...");
-
     if (messages == LORA_INIT_SHOW_CONSOLE_MESSAGES) {
         consolePrintln("Initializing LoRa...");
     }
@@ -429,33 +483,59 @@ bool initLora(LoraInitConsoleMessages messages, LoraInitJoin join)
         LoRa.setDiag(DEBUG_STREAM);
     }
 
-    bool result;
+    // Decide whether to reuse a persisted OTAA session or do a fresh join.
+    // Session reuse is only attempted when LORA_INIT_JOIN is requested; the
+    // LORA_INIT_SKIP_JOIN path (used for HWEUI reads) always does a full reset.
+    bool shouldRestoreSession = (join == LORA_INIT_JOIN)
+        && params.getIsOtaaEnabled()
+        && params.getTryPersistedOtaaSession()
+        && params.hasStoredOtaaSession();
+
+    // Always perform a full hardware reset of the RN2483 module. Persisted
+    // session reuse depends on the modem reloading its saved MAC state from its
+    // own EEPROM during reset, so we intentionally start from a clean modem boot.
+    bool reconnectOnTransmission = params.getShouldRetryConnectionOnSend() || shouldRestoreSession;
 
     LORA_STREAM.begin(LoRaBee.getDefaultBaudRate());
-    result = LoRaBee.init(LORA_STREAM, LORA_RESET);
+    bool result = LoRaBee.init(LORA_STREAM, LORA_RESET);
     LoRaBee.setReceiveCallback(updateConfigOverTheAir);
     LoRa.init(LoRaBee, getNow);
+    LoRa.setJoinSuccessCallback(onOtaaJoinSuccess);
 
     // set keys and parameters
     LoRa.setKeys(params.getDevAddrOrEUI(), params.getAppSKeyOrEUI(), params.getNwSKeyOrAppKey());
     LoRa.setOtaaOn(params.getIsOtaaEnabled());
     LoRa.setAdrOn(params.getIsAdrOn());
     LoRa.setAckOn(params.getIsAckOn());
-    LoRa.setReconnectOnTransmissionOn(params.getShouldRetryConnectionOnSend());
+    LoRa.setReconnectOnTransmissionOn(reconnectOnTransmission);
     LoRa.setDefaultLoRaPort(params.getLoraPort());
     LoRa.setRepeatTransmissionCount(params.getRepeatCount());
     LoRa.setSpreadingFactor(params.getSpreadingFactor());
     LoRa.setPowerIndex(params.getPowerIndex());
 
     if (join == LORA_INIT_JOIN) {
-        result = LoRa.join();
+        if (shouldRestoreSession) {
+            result = LoRa.restoreOtaaSession();
 
-        if (messages == LORA_INIT_SHOW_CONSOLE_MESSAGES) {
-            if (result) {
-                consolePrintln("LoRa initialized.");
+            if (messages == LORA_INIT_SHOW_CONSOLE_MESSAGES) {
+                consolePrintln(result
+                    ? "LoRa session restored."
+                    : "Persisted session restore failed; joining OTAA.");
             }
-            else {
-                consolePrintln("LoRa initialization failed!");
+
+            if (!result) {
+                result = LoRa.join();
+
+                if (messages == LORA_INIT_SHOW_CONSOLE_MESSAGES) {
+                    consolePrintln(result ? "LoRa initialized." : "LoRa initialization failed!");
+                }
+            }
+        }
+        else {
+            result = LoRa.join();
+
+            if (messages == LORA_INIT_SHOW_CONSOLE_MESSAGES) {
+                consolePrintln(result ? "LoRa initialized." : "LoRa initialization failed!");
             }
         }
     }
@@ -587,6 +667,7 @@ uint32_t getNow()
  */
 void setNow(uint32_t newEpoch)
 {
+    debugPrintln("In setNow()...");
     uint32_t currentEpoch = getNow();
 
     debugPrint("Setting RTC from ");
@@ -600,6 +681,8 @@ void setNow(uint32_t newEpoch)
     timer.adjust(currentEpoch, newEpoch);
 
     isRtcInitialized = true;
+
+    debugPrintln("Out setNow().");
 }
 
 /**
@@ -825,6 +908,7 @@ void delegateNavPvt(NavigationPositionVelocityTimeSolution* NavPvt)
  */
 bool getGpsFixAndTransmit()
 {
+    sodaq_wdt_reset();
     debugPrintln("Starting getGpsFixAndTransmit()...");
 
     if (!isGpsInitialized) {
@@ -834,10 +918,13 @@ bool getGpsFixAndTransmit()
     }
 
     bool isSuccessful = false;
+
+    debugPrintln("Calling setGpsActive(true)...");
     setGpsActive(true);
 
     pendingReportDataRecord.setSatelliteCount(0); // reset satellites to use them as a quality metric in the loop
     uint32_t startTime = getNow();
+
     while ((getNow() - startTime <= params.getGpsFixTimeout())
         && (pendingReportDataRecord.getSatelliteCount() < params.getGpsMinSatelliteCount()))
     {
@@ -906,9 +993,18 @@ void setGpsActive(bool on)
     sodaq_wdt_reset();
 
     if (on) {
+        debugPrintln("setGpsActive(on): enter");
+        debugPrintln("setGpsActive(on): ublox.enable()");
         ublox.enable();
+
+        sodaq_wdt_reset();
+
+        debugPrintln("setGpsActive(on): ublox.flush()");
         ublox.flush();
 
+        sodaq_wdt_reset();
+
+        debugPrintln("setGpsActive(on): settle delay");
         sodaq_wdt_safe_delay(80);
 
         PortConfigurationDDC pcd;
@@ -916,6 +1012,7 @@ void setGpsActive(bool on)
         uint8_t maxRetries = 6;
         int8_t retriesLeft;
 
+        debugPrintln("setGpsActive(on): getPortConfigurationDDC()");
         retriesLeft = maxRetries;
         while (!ublox.getPortConfigurationDDC(&pcd) && (retriesLeft-- > 0)) {
             debugPrintln("Retrying ublox.getPortConfigurationDDC(&pcd)...");
@@ -928,6 +1025,7 @@ void setGpsActive(bool on)
         }
 
         pcd.outProtoMask = 1; // Disable NMEA
+        debugPrintln("setGpsActive(on): setPortConfigurationDDC()");
         retriesLeft = maxRetries;
         while (!ublox.setPortConfigurationDDC(&pcd) && (retriesLeft-- > 0)) {
             debugPrintln("Retrying ublox.setPortConfigurationDDC(&pcd)...");
@@ -939,8 +1037,10 @@ void setGpsActive(bool on)
             return;
         }
 
+        debugPrintln("setGpsActive(on): CfgMsg(UBX_NAV_PVT, 1)");
         ublox.CfgMsg(UBX_NAV_PVT, 1); // Navigation Position Velocity TimeSolution
         ublox.funcNavPvt = delegateNavPvt;
+        debugPrintln("setGpsActive(on): ready");
     }
     else {
         ublox.disable();
@@ -1051,43 +1151,81 @@ void onConfigReset(void)
 {
     setDevAddrOrEUItoHWEUI();
 
-#ifdef DEFAULT_TEMPERATURE_SENSOR_OFFSET
+    params._defaultFixInterval = DEFAULT_FIX_INTERVAL;
+    params._alternativeFixInterval = DEFAULT_ALTERNATIVE_FIX_INTERVAL;
+    params._alternativeFixFromHours = DEFAULT_ALTERNATIVE_FIX_FROM_HOURS;
+    params._alternativeFixFromMinutes = DEFAULT_ALTERNATIVE_FIX_FROM_MINUTES;
+    params._alternativeFixToHours = DEFAULT_ALTERNATIVE_FIX_TO_HOURS;
+    params._alternativeFixToMinutes = DEFAULT_ALTERNATIVE_FIX_TO_MINUTES;
+    params._gpsFixTimeout = DEFAULT_GPS_FIX_TIMEOUT;
+
+    params._accelerationPercentage = DEFAULT_ACCELERATION_PERCENTAGE;
+    params._accelerationDuration = DEFAULT_ACCELERATION_DURATION;
+    params._onTheMoveFixInterval = DEFAULT_ON_THE_MOVE_FIX_INTERVAL;
+    params._onTheMoveTimeout = DEFAULT_ON_THE_MOVE_TIMEOUT;
+
     params._temperatureSensorOffset = DEFAULT_TEMPERATURE_SENSOR_OFFSET;
-#endif
-
-#ifdef DEFAULT_LORA_PORT
-    params._loraPort = DEFAULT_LORA_PORT;
-#endif
-
-#ifdef DEFAULT_IS_OTAA_ENABLED
+    params._isLedEnabled = DEFAULT_IS_LED_ENABLED;
     params._isOtaaEnabled = DEFAULT_IS_OTAA_ENABLED;
-#endif
+    params._tryPersistedOtaaSession = DEFAULT_TRY_PERSISTED_OTAA_SESSION;
+    params._hasOtaaJoinedBefore = DEFAULT_HAS_OTAA_JOINED_BEFORE;
+    params._shouldRetryConnectionOnSend = DEFAULT_SHOULD_RETRY_CONNECTION_ON_SEND;
+    params._loraPort = DEFAULT_LORA_PORT;
+    params._isAdrOn = DEFAULT_IS_ADR_ON;
+    params._isAckOn = DEFAULT_IS_ACK_ON;
+    params._spreadingFactor = DEFAULT_SPREADING_FACTOR;
+    params._powerIndex = DEFAULT_POWER_INDEX;
+    params._isGpsOn = DEFAULT_IS_GPS_ON;
+    params._gpsMinSatelliteCount = DEFAULT_GPS_MIN_SATELLITE_COUNT;
+    params._coordinateUploadCount = DEFAULT_COORDINATE_UPLOAD_COUNT;
+    params._repeatCount = DEFAULT_REPEAT_COUNT;
+    params._isDebugOn = DEFAULT_IS_DEBUG_ON;
+    params._isCayennePayloadEnabled = DEFAULT_IS_CAYENNE_PAYLOAD_ENABLED;
 
-#ifdef DEFAULT_DEVADDR_OR_DEVEUI
-    // fail if the defined string is larger than what is expected in the config
+#if ENABLE_DEV_PROVISIONING
+    // Development-only fast provisioning path. Keep this disabled for normal
+    // builds so migrated devices retain a unique DevEUI derived from HWEUI.
     BUILD_BUG_ON(sizeof(DEFAULT_DEVADDR_OR_DEVEUI) > sizeof(params._devAddrOrEUI));
-
     strcpy(params._devAddrOrEUI, DEFAULT_DEVADDR_OR_DEVEUI);
-#endif
 
-#ifdef DEFAULT_APPSKEY_OR_APPEUI
-    // fail if the defined string is larger than what is expected in the config
     BUILD_BUG_ON(sizeof(DEFAULT_APPSKEY_OR_APPEUI) > sizeof(params._appSKeyOrEUI));
-
     strcpy(params._appSKeyOrEUI, DEFAULT_APPSKEY_OR_APPEUI);
-#endif
 
-#ifdef DEFAULT_NWSKEY_OR_APPKEY
-    // fail if the defined string is larger than what is expected in the config
     BUILD_BUG_ON(sizeof(DEFAULT_NWSKEY_OR_APPKEY) > sizeof(params._nwSKeyOrAppKey));
-
     strcpy(params._nwSKeyOrAppKey, DEFAULT_NWSKEY_OR_APPKEY);
 #endif
+}
 
-#ifdef DEBUG
-    params._isDebugOn = true;
-#endif
+void onOtaaJoinSuccess(void)
+{
+    // Only persist the session when otas=1.
+    if (!params.getTryPersistedOtaaSession()) {
+        if (params.getHasOtaaJoinedBefore()) {
+            params._hasOtaaJoinedBefore = 0;
+            params.commit(true);
+        }
+        return;
+    }
 
+    // RN2483 does not expose OTAA-derived session keys through "mac get", but
+    // it can persist the full LoRaWAN MAC state (including session keys and
+    // counters) in its own EEPROM via "mac save". On the next reset, the modem
+    // restores those parameters and we reactivate them with "mac join abp".
+    char saveResponse[32] = { 0 };
+    sodaq_wdt_safe_delay(500);
+    bool saved = LoRaBee.saveMacState(saveResponse, sizeof(saveResponse));
+
+    if (saved) {
+        params._hasOtaaJoinedBefore = 1;
+        params.commit(true);
+    }
+    else {
+        params._hasOtaaJoinedBefore = 0;
+        params.commit(true);
+        consolePrintln("Persisted OTAA session save failed.");
+        debugPrint("[session] mac save failed: ");
+        debugPrintln(saveResponse[0] ? saveResponse : "timeout");
+    }
 }
 
 void getHWEUI()

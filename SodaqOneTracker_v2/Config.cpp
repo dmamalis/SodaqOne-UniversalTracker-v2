@@ -33,7 +33,7 @@ POSSIBILITY OF SUCH DAMAGE.
 #include "Command.h"
 #include "FlashStorage.h"
 
-#define DEFAULT_HEADER 0xBEEF
+#define DEFAULT_HEADER 0xBEF0
 
 ConfigParams params;
 
@@ -66,11 +66,16 @@ void ConfigParams::read()
     uint16_t calcCRC16 = crc16ccitt((uint8_t*)this, (uint32_t)&params._crc16 - (uint32_t)&params._header);
     if (_header != DEFAULT_HEADER || _crc16 != calcCRC16) {
         reset();
+        commit(true);
     }
 }
 
 void ConfigParams::reset()
 {
+    // Keep deterministic fallback values here; the sketch's onConfigReset()
+    // callback applies the user-editable defaults from a single place.
+    memset(this, 0, sizeof(*this));
+
     _defaultFixInterval = 15;
     _alternativeFixInterval = 0;
     _alternativeFixFromHours = 0;
@@ -99,12 +104,13 @@ void ConfigParams::reset()
     _temperatureSensorOffset = 20;
     _loraPort = 1;
     _isAdrOn = 1;
-    _isAckOn = 0;
+    _tryPersistedOtaaSession = 1;
     _spreadingFactor = 7;
     _powerIndex = 1;
     _isGpsOn = 1;
     _gpsMinSatelliteCount = 4;
     _isDebugOn = 0;
+    _isCayennePayloadEnabled = 0;
 
     if (configResetCallback) {
         configResetCallback();
@@ -149,6 +155,7 @@ static const Command args[] = {
     { "Timeout (min)             ", "act=", Command::set_uint8, Command::show_uint8, &params._onTheMoveTimeout },
     { "LoRa                      ", 0,      0,                  Command::show_title, 0 },
     { "OTAA Mode (OFF=0 / ON=1)  ", "otaa=", Command::set_uint8, Command::show_uint8, &params._isOtaaEnabled },
+    { "Try saved OTAA session    ", "otas=", Command::set_uint8, Command::show_uint8, &params._tryPersistedOtaaSession },
     { "Retry conn. (OFF=0 / ON=1)", "retry=", Command::set_uint8, Command::show_uint8, &params._shouldRetryConnectionOnSend },
     { "ADR (OFF=0 / ON=1)        ", "adr=", Command::set_uint8, Command::show_uint8, &params._isAdrOn },
     { "ACK (OFF=0 / ON=1)        ", "ack=", Command::set_uint8, Command::show_uint8, &params._isAckOn },
@@ -238,6 +245,16 @@ bool ConfigParams::checkConfig(Stream& stream)
 
     if (_isOtaaEnabled > 1) {
         stream.println("OTAA Mode must be either 0 or 1");
+        fail = true;
+    }
+
+    if (_tryPersistedOtaaSession > 1) {
+        stream.println("Try saved OTAA session must be either 0 or 1");
+        fail = true;
+    }
+
+    if (_hasOtaaJoinedBefore > 1) {
+        stream.println("OTAA joined-before flag must be either 0 or 1");
         fail = true;
     }
 

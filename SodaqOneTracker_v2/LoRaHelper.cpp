@@ -40,7 +40,8 @@ LoRaHelper::LoRaHelper() :
     _retransmissionPacketSize(0),
     _retransmissionOverrideLoRaPort(-1),
     _lastTransmissionAttemptTimestamp(0),
-    _getNow(0)
+    _getNow(0),
+    _joinSuccessCallback(0)
 {
 }
 
@@ -268,14 +269,37 @@ bool LoRaHelper::join()
     if (result) {
         _isInitialized = true;
 
+        if (_isOtaaOn && _joinSuccessCallback) {
+            _joinSuccessCallback();
+        }
+
         if (!_isAdrOn) {
             _rn2483->setSpreadingFactor(_spreadingFactor);
         }
 
         _rn2483->setPowerIndex(_powerIndex);
     }
-
     return result;
+}
+
+bool LoRaHelper::restoreOtaaSession()
+{
+    debugPrintln("Trying persisted OTAA session...");
+    _rn2483->wakeUp();
+
+    bool result = _rn2483->resumeSavedSession();
+    if (!result) {
+        debugPrintln("Persisted session activation failed.");
+        return false;
+    }
+
+    _isInitialized = true;
+
+    if (!_isAdrOn) {
+        _rn2483->setSpreadingFactor(_spreadingFactor);
+    }
+
+    return _rn2483->setPowerIndex(_powerIndex);
 }
 
 void LoRaHelper::extendSleep()

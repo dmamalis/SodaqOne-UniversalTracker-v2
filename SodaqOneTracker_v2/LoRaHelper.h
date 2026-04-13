@@ -12,6 +12,8 @@
 class LoRaHelper
 {
 public:
+    typedef void(*JoinSuccessCallback)(void);
+
     LoRaHelper();
 
     void setDiag(Stream& stream) { _diagStream = &stream; };
@@ -41,10 +43,15 @@ public:
 
     void setSpreadingFactor(uint8_t spreadingFactor) { _spreadingFactor = spreadingFactor; };
     void setPowerIndex(uint8_t powerIndex) { _powerIndex = powerIndex; };
+    void setJoinSuccessCallback(JoinSuccessCallback callback) { _joinSuccessCallback = callback; };
     void setActive(bool on);
     bool isInitialized() { return _isInitialized; };
     uint8_t getHWEUI(uint8_t* hweui, uint8_t size);
     bool join();
+    // Reuses a previously saved OTAA session that the RN2483 restored from its
+    // own EEPROM during boot/reset. Returns false when session reactivation
+    // fails, so the caller can fall back to a fresh OTAA join.
+    bool restoreOtaaSession();
     uint8_t transmit(uint8_t* buffer, uint8_t size, int16_t overrideLoRaPort = -1);
     void extendSleep();
     void loopHandler();
@@ -70,6 +77,7 @@ private:
     int16_t _retransmissionOverrideLoRaPort;
     uint32_t _lastTransmissionAttemptTimestamp;
     uint32_t (*_getNow)();
+    JoinSuccessCallback _joinSuccessCallback;
 
     bool convertAndCheckHexArray(uint8_t* result, const char* hex, size_t resultSize);
     bool joinAbp();
@@ -81,4 +89,3 @@ private:
 extern LoRaHelper LoRa;
 
 #endif
-

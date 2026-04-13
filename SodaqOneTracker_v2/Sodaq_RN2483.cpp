@@ -98,7 +98,7 @@ void Sodaq_RN2483::fillVersionFromReceivedBuffer()
 // Takes care of the init tasks common to both initOTA() and initABP.
 // If hardware reset is available, the module is re-set, otherwise it is woken up if possible.
 // Returns true if the module replies to a device reset command.
-bool Sodaq_RN2483::init(SerialType& stream, int8_t resetPin)
+bool Sodaq_RN2483::init(SerialType& stream, int8_t resetPin, bool performReset)
 {
     debugPrintLn("[init]");
 
@@ -120,6 +120,14 @@ bool Sodaq_RN2483::init(SerialType& stream, int8_t resetPin)
     }
 
 #endif
+
+    if (!performReset) {
+        // Just wake the module and continue with the current state/session.
+#ifdef ENABLE_SLEEP
+        wakeUp();
+#endif
+        return true;
+    }
 
     if (isHardwareResetEnabled()) {
         hardwareReset();
@@ -148,7 +156,18 @@ bool Sodaq_RN2483::initOTA(SerialType& stream, const uint8_t devEUI[8], const ui
 
 bool Sodaq_RN2483::initOTA(const uint8_t devEUI[8], const uint8_t appEUI[8], const uint8_t appKey[16], bool adr)
 {
-    return setMacParam(STR_DEV_EUI, devEUI, 8)
+    static const uint8_t zeroDevAddr[4] = { 0, 0, 0, 0 };
+    static const uint8_t zeroSessionKey[16] = {
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0
+    };
+
+    // RN2483 session persistence after OTAA join is more reliable when the ABP
+    // parameter slots have been initialized at least once before "mac save".
+    // OTAA will overwrite these runtime values after a successful join accept.
+    return setMacParam(STR_DEV_ADDR, zeroDevAddr, 4)
+           && setMacParam(STR_APP_SESSION_KEY, zeroSessionKey, 16)
+           && setMacParam(STR_NETWORK_SESSION_KEY, zeroSessionKey, 16)
+           && setMacParam(STR_DEV_EUI, devEUI, 8)
            && setMacParam(STR_APP_EUI, appEUI, 8)
            && setMacParam(STR_APP_KEY, appKey, 16)
            && setMacParam(STR_ADR, BOOL_TO_ONOFF(adr))
@@ -271,6 +290,39 @@ uint8_t Sodaq_RN2483::getHWEUI(uint8_t* buffer, uint8_t size)
 
     debugPrint("[getHWEUI] Timed out without a response!");
     return 0;
+}
+
+bool Sodaq_RN2483::saveMacState(char* responseBuffer, uint8_t size)
+{
+    print("mac save");
+    println();
+
+    const uint16_t saveTimeout = 3000;
+    unsigned long start = millis();
+
+    while (millis() - start < saveTimeout) {
+        sodaq_wdt_reset();
+
+        if (readLn() > 0) {
+            if (responseBuffer != 0 && size > 0) {
+                strncpy(responseBuffer, this->_inputBuffer, size - 1);
+                responseBuffer[size - 1] = '\0';
+            }
+
+            return strstr(this->_inputBuffer, STR_RESULT_OK) != NULL;
+        }
+    }
+
+    if (responseBuffer != 0 && size > 0) {
+        responseBuffer[0] = '\0';
+    }
+
+    return false;
+}
+
+bool Sodaq_RN2483::resumeSavedSession()
+{
+    return joinNetwork(STR_ABP);
 }
 
 #ifdef ENABLE_SLEEP
