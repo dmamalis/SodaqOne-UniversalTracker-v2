@@ -85,6 +85,7 @@ POSSIBILITY OF SUCH DAMAGE.
 #define DEFAULT_IS_ACK_ON 0
 #define DEFAULT_SPREADING_FACTOR 9
 #define DEFAULT_POWER_INDEX 1
+#define ENABLE_DEV_PROVISIONING 1
 #define DEFAULT_DEVADDR_OR_DEVEUI "0004A30B001F504C"
 #define DEFAULT_APPSKEY_OR_APPEUI "5AE787EFDE8FF542"
 #define DEFAULT_NWSKEY_OR_APPKEY "20EF4D99ED4C0A30482EE5CEA003BC34"
@@ -1181,20 +1182,18 @@ void onConfigReset(void)
     params._isDebugOn = DEFAULT_IS_DEBUG_ON;
     params._isCayennePayloadEnabled = DEFAULT_IS_CAYENNE_PAYLOAD_ENABLED;
 
-    // fail if the defined string is larger than what is expected in the config
+#if ENABLE_DEV_PROVISIONING
+    // Development-only fast provisioning path. Keep this disabled for normal
+    // builds so migrated devices retain a unique DevEUI derived from HWEUI.
     BUILD_BUG_ON(sizeof(DEFAULT_DEVADDR_OR_DEVEUI) > sizeof(params._devAddrOrEUI));
-
     strcpy(params._devAddrOrEUI, DEFAULT_DEVADDR_OR_DEVEUI);
 
-    // fail if the defined string is larger than what is expected in the config
     BUILD_BUG_ON(sizeof(DEFAULT_APPSKEY_OR_APPEUI) > sizeof(params._appSKeyOrEUI));
-
     strcpy(params._appSKeyOrEUI, DEFAULT_APPSKEY_OR_APPEUI);
 
-    // fail if the defined string is larger than what is expected in the config
     BUILD_BUG_ON(sizeof(DEFAULT_NWSKEY_OR_APPKEY) > sizeof(params._nwSKeyOrAppKey));
-
     strcpy(params._nwSKeyOrAppKey, DEFAULT_NWSKEY_OR_APPKEY);
+#endif
 }
 
 void onOtaaJoinSuccess(void)
