@@ -97,15 +97,10 @@ POSSIBILITY OF SUCH DAMAGE.
 #define DEFAULT_IS_LED_ENABLED 1
 
 
-#ifdef DEBUG
-#define DEFAULT_IS_DEBUG_ON 1
-#else
-#define DEFAULT_IS_DEBUG_ON 0
-#endif
-
 #define GPS_TIME_VALIDITY 0b00000011 // date and time (but not fully resolved)
 #define GPS_FIX_FLAGS 0b00000001 // just gnssFixOK
 #define GPS_COMM_CHECK_TIMEOUT 3 // seconds
+#define GPS_ON_THE_MOVE_PSM_PERIOD_MS 10000 // 10 s between navigation solutions in PSM cyclic mode
 
 #define MAX_RTC_EPOCH_OFFSET 25
 
@@ -153,6 +148,7 @@ volatile bool updateOnTheMoveTimestampFlag;
 
 static uint8_t lastResetCause;
 static bool isGpsInitialized;
+static bool isGpsInPowerSaveMode;
 static bool isRtcInitialized;
 static bool isDeviceInitialized;
 static bool isOnTheMoveInitialized;
@@ -184,6 +180,7 @@ void runAlternativeFixEvent(uint32_t now);
 void runLoraModuleSleepExtendEvent(uint32_t now);
 void setGpsActive(bool on);
 void setAccelerometerTempSensorActive(bool on);
+void transmitOnTheMove();
 bool isAlternativeFixEventApplicable();
 bool isCurrentTimeOfDayWithin(uint32_t daySecondsFrom, uint32_t daySecondsTo);
 void delegateNavPvt(NavigationPositionVelocityTimeSolution* NavPvt);
@@ -379,10 +376,46 @@ int8_t getBoardTemperature()
 }
 
 /**
+ * Transmits a compact payload containing only lat/lon for on-the-move events.
+ * Cayenne LPP: GPS channel only (11 bytes vs ~19 for full record).
+ * Raw binary:  int32 lat + int32 lon (8 bytes vs 21 for full record).
+ * Smaller frames reduce Time-on-Air and allow more transmissions within
+ * duty-cycle limits while the device is moving.
+ */
+void transmitOnTheMove()
+{
+    if (params.getIsCayennePayloadEnabled()) {
+        cayenneRecord.reset();
+        cayenneRecord.addGPS(1,
+            (float)pendingReportDataRecord.getLat()  / 10000000.0f,
+            (float)pendingReportDataRecord.getLong() / 10000000.0f,
+            0.0f);
+        LoRa.transmit(cayenneRecord.getBuffer(), cayenneRecord.getSize());
+    }
+    else {
+        uint8_t sendBuffer[8];
+        int32_t lat = pendingReportDataRecord.getLat();
+        int32_t lon = pendingReportDataRecord.getLong();
+        memcpy(sendBuffer,     &lat, sizeof(lat));
+        memcpy(sendBuffer + 4, &lon, sizeof(lon));
+        LoRa.transmit(sendBuffer, sizeof(sendBuffer));
+    }
+}
+
+/**
  * Transmits the current data (using the current "pendingReportDataRecord").
  */
 void transmit()
 {
+    // Use the compact on-the-move payload only when a valid fix was obtained.
+    // timeToFix == 0xFF is the sentinel for "no fix / stale coordinates", in
+    // which case the full record is sent so downstream consumers can detect the
+    // failure and avoid silently ingesting stale or 0,0 coordinates.
+    if (isOnTheMoveActivated && pendingReportDataRecord.getTimeToFix() != 0xFF) {
+        transmitOnTheMove();
+        return;
+    }
+
     if (params.getIsCayennePayloadEnabled()) {
         // Reset the record
         cayenneRecord.reset();
@@ -617,7 +650,14 @@ void systemSleep()
     LORA_STREAM.flush();
 
     setLedColor(NONE);
-    setGpsActive(false); // explicitly disable after resetting the pins
+
+    // During on-the-move the GPS is kept in PSM cyclic tracking so it retains
+    // ephemeris and can deliver a fast fix at the next wake.  When the mode ends
+    // (isOnTheMoveActivated goes false) GPS is powered off normally.
+    if (!isOnTheMoveActivated) {
+        setGpsActive(false);
+        isGpsInPowerSaveMode = false;
+    }
 
     // go to sleep, unless USB is used for debugging
     if (!params.getIsDebugOn() || ((long)&DEBUG_STREAM != (long)&SerialUSB)) {
@@ -919,6 +959,12 @@ bool getGpsFixAndTransmit()
 
     bool isSuccessful = false;
 
+    // If GPS is in PSM from a previous on-the-move cycle, switch it back to
+    // continuous mode before reconfiguring so it responds immediately.
+    if (isOnTheMoveActivated && isGpsInPowerSaveMode) {
+        ublox.setContinuousMode();
+        sodaq_wdt_safe_delay(100);
+    }
     debugPrintln("Calling setGpsActive(true)...");
     setGpsActive(true);
 
@@ -946,7 +992,24 @@ bool getGpsFixAndTransmit()
         }
     }
 
-    setGpsActive(false); // turn off gps as soon as it is not needed
+    // During on-the-move: put GPS into PSM cyclic tracking so it keeps ephemeris
+    // alive between fix events (saving ~16 mA vs continuous).
+    // Only treat GPS as being in PSM when the receiver acknowledged both UBX
+    // commands.  On failure, fall back to a full power-off so the next fix cycle
+    // starts clean and battery drain is bounded.
+    if (isOnTheMoveActivated) {
+        if (ublox.setPowerSaveMode(GPS_ON_THE_MOVE_PSM_PERIOD_MS)) {
+            isGpsInPowerSaveMode = true;
+        }
+        else {
+            debugPrintln("GPS PSM command failed; powering off.");
+            setGpsActive(false);
+            isGpsInPowerSaveMode = false;
+        }
+    }
+    else {
+        setGpsActive(false);
+    }
 
     // populate all fields of the report record
     pendingReportDataRecord.setTimestamp(getNow());
@@ -1179,7 +1242,11 @@ void onConfigReset(void)
     params._gpsMinSatelliteCount = DEFAULT_GPS_MIN_SATELLITE_COUNT;
     params._coordinateUploadCount = DEFAULT_COORDINATE_UPLOAD_COUNT;
     params._repeatCount = DEFAULT_REPEAT_COUNT;
-    params._isDebugOn = DEFAULT_IS_DEBUG_ON;
+#ifdef DEBUG
+    params._isDebugOn = 1;
+#else
+    params._isDebugOn = 0;
+#endif
     params._isCayennePayloadEnabled = DEFAULT_IS_CAYENNE_PAYLOAD_ENABLED;
 
 #if ENABLE_DEV_PROVISIONING
