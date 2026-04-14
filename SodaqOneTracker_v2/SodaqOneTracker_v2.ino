@@ -1004,6 +1004,7 @@ bool getGpsFixAndTransmit()
         else {
             debugPrintln("GPS PSM command failed; powering off.");
             setGpsActive(false);
+            isGpsInPowerSaveMode = false;
         }
     }
     else {
