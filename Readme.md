@@ -75,7 +75,7 @@ Will set the time between the GPS fixes to 5 minutes.
 Setting fi=0 will disable the default fix interval.
 
 #### Sleep
-After the startup the device by default willt be in deep sleep mode. In sleep it uses less than 50 uA. Using the RTC Timers it will wake up at the set intervals.
+After startup the device by default will be in deep sleep mode. In sleep it uses less than 50 uA. Using the RTC Timers it will wake up at the set intervals.
 
 #### Timers and Watchdog
 The application is based on the RTCTimer library. At startup the application tries to obtain a GPS fix until timeout. If no fix can be obtained initially the location will be set to 0,0. Once the first fix is obtained the RTC will be set and that fix location will be kept until the next proper fix.
@@ -109,6 +109,9 @@ The on-board accelerometer provides temperature delta with 1 degree Celsius reso
 
 The firmware supports, except for the default and alternative fix intervals, a third fix interval that is dependent to movement: if the acceleration on any axis goes over (or below in the case of a negative axis) the acceleration set in Acceleration% parameter for over the set duration, the on-the-move fix interval becomes active until "Timeout" minutes have passed since the last movement detected.
 
+While on-the-move is active, instead of powering the GPS off after each fix, the receiver is kept in u-blox PSM cyclic tracking mode (UBX-CFG-PM2 + UBX-CFG-RXM). The RF chain is duty-cycled (~2 s on / ~8 s off per 10 s cycle) while the module stays responsive and retains ephemeris, reducing average current from ~20 mA to ~4 mA between fixes and enabling fast re-acquisition at the next event. GPS is powered off cleanly on the first sleep after the on-the-move timeout expires.
+
+When on-the-move is active and a valid GPS fix is obtained, a compact LoRa payload is sent containing only latitude and longitude (8 bytes raw binary, or 11 bytes Cayenne LPP), reducing Time-on-Air and allowing more frequent transmissions within the duty-cycle budget. If GPS acquisition fails (no fix), the full standard payload is sent instead so that downstream consumers can detect the failure via the Time to fix field (0xFF = no fix).
 
 #### LoRa Frame content
 
