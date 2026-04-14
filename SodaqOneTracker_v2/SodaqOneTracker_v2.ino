@@ -73,7 +73,7 @@ POSSIBILITY OF SUCH DAMAGE.
 // On-the-move Functionality
 #define DEFAULT_ACCELERATION_PERCENTAGE 0
 #define DEFAULT_ACCELERATION_DURATION 0
-#define DEFAULT_ON_THE_MOVE_FIX_INTERVAL 1
+#define DEFAULT_ON_THE_MOVE_FIX_INTERVAL 30
 #define DEFAULT_ON_THE_MOVE_TIMEOUT 10
 
 // LoRa
@@ -815,7 +815,7 @@ void resetRtcTimerEvents()
     }
 
     if (isOnTheMoveInitialized) {
-        timer.every(params.getOnTheMoveFixInterval() * 60, runOnTheMoveFixEvent);
+        timer.every(params.getOnTheMoveFixInterval(), runOnTheMoveFixEvent);
     }
 
     // if lora is not enabled, schedule an event that takes care of extending the sleep time of the module

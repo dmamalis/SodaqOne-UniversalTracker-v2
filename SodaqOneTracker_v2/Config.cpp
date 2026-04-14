@@ -33,7 +33,7 @@ POSSIBILITY OF SUCH DAMAGE.
 #include "Command.h"
 #include "FlashStorage.h"
 
-#define DEFAULT_HEADER 0xBEF0
+#define DEFAULT_HEADER 0xBEF1
 
 ConfigParams params;
 
@@ -98,7 +98,7 @@ void ConfigParams::reset()
 
     _accelerationPercentage = 0;
     _accelerationDuration = 0;
-    _onTheMoveFixInterval = 1;
+    _onTheMoveFixInterval = 30;
     _onTheMoveTimeout = 10;
 
     _temperatureSensorOffset = 20;
@@ -151,7 +151,7 @@ static const Command args[] = {
     { "On-the-move Functionality ", 0,      0,                  Command::show_title, 0 },
     { "Acceleration% (100% = 8g) ", "acc=", Command::set_uint8, Command::show_uint8, &params._accelerationPercentage },
     { "Acceleration Duration     ", "acd=", Command::set_uint8, Command::show_uint8, &params._accelerationDuration },
-    { "Fix Interval (min)        ", "acf=", Command::set_uint8, Command::show_uint8, &params._onTheMoveFixInterval },
+    { "Fix Interval (sec)        ", "acf=", Command::set_uint8, Command::show_uint8, &params._onTheMoveFixInterval },
     { "Timeout (min)             ", "act=", Command::set_uint8, Command::show_uint8, &params._onTheMoveTimeout },
     { "LoRa                      ", 0,      0,                  Command::show_title, 0 },
     { "OTAA Mode (OFF=0 / ON=1)  ", "otaa=", Command::set_uint8, Command::show_uint8, &params._isOtaaEnabled },

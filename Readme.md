@@ -40,7 +40,7 @@ GPS
 On-the-move Functionality
   Acceleration% (100% = 8g)  (acc=): 0
   Acceleration Duration      (acd=): 0
-  Fix Interval (min)         (acf=): 1
+  Fix Interval (sec)         (acf=): 30
   Timeout (min)              (act=): 10
 
 LoRa
@@ -107,7 +107,7 @@ The on-board accelerometer provides temperature delta with 1 degree Celsius reso
 
 #### On-the-move Functionality
 
-The firmware supports, except for the default and alternative fix intervals, a third fix interval that is dependent to movement: if the acceleration on any axis goes over (or below in the case of a negative axis) the acceleration set in Acceleration% parameter for over the set duration, the on-the-move fix interval becomes active until "Timeout" minutes have passed since the last movement detected.
+The firmware supports, except for the default and alternative fix intervals, a third fix interval that is dependent to movement: if the acceleration on any axis goes over (or below in the case of a negative axis) the acceleration set in Acceleration% parameter for over the set duration, the on-the-move fix interval becomes active until "Timeout" minutes have passed since the last movement detected. The fix interval (`acf`) is expressed in **seconds** (default 30 s), allowing sub-minute update rates suitable for fast-moving assets such as bicycles.
 
 While on-the-move is active, instead of powering the GPS off after each fix, the receiver is kept in u-blox PSM cyclic tracking mode (UBX-CFG-PM2 + UBX-CFG-RXM). The RF chain is duty-cycled (~2 s on / ~8 s off per 10 s cycle) while the module stays responsive and retains ephemeris, reducing average current from ~20 mA to ~4 mA between fixes and enabling fast re-acquisition at the next event. GPS is powered off cleanly on the first sleep after the on-the-move timeout expires.
 
