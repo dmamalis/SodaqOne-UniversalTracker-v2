@@ -51,7 +51,7 @@ struct ConfigParams
 
     uint8_t _accelerationPercentage;
     uint8_t _accelerationDuration;
-    uint8_t _onTheMoveFixInterval;
+    uint16_t _onTheMoveFixInterval; // seconds (1–65535)
     uint8_t _onTheMoveTimeout;
 
     int8_t _temperatureSensorOffset;
@@ -100,7 +100,7 @@ public:
 
     uint8_t getAccelerationPercentage() const { return _accelerationPercentage; }
     uint8_t getAccelerationDuration() const { return _accelerationDuration; }
-    uint8_t getOnTheMoveFixInterval() const { return _onTheMoveFixInterval; }
+    uint16_t getOnTheMoveFixInterval() const { return _onTheMoveFixInterval; }
     uint8_t getOnTheMoveTimeout() const { return _onTheMoveTimeout; }
 
     int8_t getTemperatureSensorOffset() const { return _temperatureSensorOffset; };
