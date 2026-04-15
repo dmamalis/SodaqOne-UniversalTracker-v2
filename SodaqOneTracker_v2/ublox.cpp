@@ -264,6 +264,8 @@ void UBlox::sendraw() {
  */
 bool UBlox::setPowerSaveMode(uint32_t updatePeriodMs)
 {
+    _lastPowerSaveModeResult = PowerSaveModeOk;
+
     // UBX-CFG-PM2: 4 header bytes + 44 payload bytes = 48 total
     uint8_t buffer[48];
     memset(buffer, 0, sizeof(buffer));
@@ -296,9 +298,12 @@ bool UBlox::setPowerSaveMode(uint32_t updatePeriodMs)
     buffer[24] = 0x02;
 
     if (this->send(buffer, sizeof(buffer)) != 0) {
+        _lastPowerSaveModeResult = PowerSaveModePm2SendFailed;
         return false;  // I2C write failed
     }
-    if (this->wait() != 0x0500) {  // 0x0500 = UBX-ACK-ACK
+    int pm2Ack = this->waitForAck(0x063B);
+    if (pm2Ack != 0x0500) {  // 0x0500 = UBX-ACK-ACK
+        _lastPowerSaveModeResult = (pm2Ack == 0x0501) ? PowerSaveModePm2Nak : PowerSaveModePm2Timeout;
         return false;  // receiver NAKed or did not respond
     }
 
@@ -311,9 +316,16 @@ bool UBlox::setPowerSaveMode(uint32_t updatePeriodMs)
     rxm[4] = 0x08;  // reserved
     rxm[5] = 0x01;  // lpMode = power save
     if (this->send(rxm, sizeof(rxm)) != 0) {
+        _lastPowerSaveModeResult = PowerSaveModeRxmSendFailed;
         return false;
     }
-    return (this->wait() == 0x0500);
+    int rxmAck = this->waitForAck(0x0611);
+    if (rxmAck != 0x0500) {
+        _lastPowerSaveModeResult = (rxmAck == 0x0501) ? PowerSaveModeRxmNak : PowerSaveModeRxmTimeout;
+        return false;
+    }
+
+    return true;
 }
 
 /**
@@ -334,7 +346,46 @@ bool UBlox::setContinuousMode()
     if (this->send(rxm, sizeof(rxm)) != 0) {
         return false;
     }
-    return (this->wait() == 0x0500);
+    return (this->waitForAck(0x0611) == 0x0500);
+}
+
+bool UBlox::getGnssConfiguration(uint8_t* buffer, uint16_t* length, uint16_t maxLength)
+{
+    uint8_t poll[4];
+    poll[0] = 0x06;
+    poll[1] = 0x3E;
+    poll[2] = 0x00;
+    poll[3] = 0x00;
+
+    if (this->send(poll, sizeof(poll)) != 0) {
+        return false;
+    }
+
+    return this->waitForMessage(0x063E, buffer, length, maxLength);
+}
+
+bool UBlox::setGnssConfiguration(const uint8_t* buffer, uint16_t length)
+{
+    if (!buffer || length == 0) {
+        return false;
+    }
+
+    uint8_t message[68];
+    if (length > (sizeof(message) - 4)) {
+        return false;
+    }
+
+    message[0] = 0x06;
+    message[1] = 0x3E;
+    message[2] = (uint8_t)(length & 0xFF);
+    message[3] = (uint8_t)((length >> 8) & 0xFF);
+    memcpy(&message[4], buffer, length);
+
+    if (this->send(message, length + 4) != 0) {
+        return false;
+    }
+
+    return (this->waitForAck(0x063E, 500) == 0x0500);
 }
 
 void UBlox::CfgMsg(uint16_t Msg,uint8_t rate) {
@@ -424,6 +475,95 @@ int UBlox::wait() {
         } while (bytes);
     }
     return id;
+}
+
+int UBlox::waitForAck(uint16_t ackedId, uint32_t timeoutMs)
+{
+    uint32_t start = millis();
+
+    while ((millis() - start) < timeoutMs) {
+        uint16_t bytes = this->available();
+
+        if (!bytes) {
+            delay(1);
+            continue;
+        }
+
+        do {
+            uint8_t read;
+            if (bytes >= 128) {
+                read = Wire_.requestFrom(address_, 128);
+            }
+            else {
+                read = Wire_.requestFrom(address_, bytes);
+            }
+            bytes -= read;
+
+            while (Wire_.available()) {
+                uint8_t c = Wire.read();
+                int pid = this->process(c);
+
+                if (pid == 0x0500 || pid == 0x0501) {
+                    if (AckedId_ == ackedId) {
+                        return pid;
+                    }
+                }
+                else if (pid > 0) {
+                    this->dispatchMessage(pid);
+                }
+            }
+        } while (bytes);
+    }
+
+    return 0;
+}
+
+bool UBlox::waitForMessage(uint16_t id, uint8_t* buffer, uint16_t* length, uint16_t maxLength, uint32_t timeoutMs)
+{
+    uint32_t start = millis();
+
+    while ((millis() - start) < timeoutMs) {
+        uint16_t bytes = this->available();
+
+        if (!bytes) {
+            delay(1);
+            continue;
+        }
+
+        do {
+            uint8_t read;
+            if (bytes >= 128) {
+                read = Wire_.requestFrom(address_, 128);
+            }
+            else {
+                read = Wire_.requestFrom(address_, bytes);
+            }
+            bytes -= read;
+
+            while (Wire_.available()) {
+                uint8_t c = Wire.read();
+                int pid = this->process(c);
+
+                if (pid == id) {
+                    if (length) {
+                        *length = payLoad_.length;
+                    }
+
+                    if (!buffer || payLoad_.length > maxLength) {
+                        return false;
+                    }
+
+                    memcpy(buffer, payLoad_.buffer, payLoad_.length);
+                    return true;
+                }
+                else if (pid > 0) {
+                    this->dispatchMessage(pid);
+                }
+            }
+        } while (bytes);
+    }
+
+    return false;
 }
 
 bool UBlox::wait(uint16_t rid,int reqLength,void *d) {

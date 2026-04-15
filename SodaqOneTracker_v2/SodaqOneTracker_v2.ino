@@ -145,14 +145,34 @@ volatile bool minuteFlag;
 volatile bool isOnTheMoveActivated;
 volatile uint32_t lastOnTheMoveActivationTimestamp;
 volatile bool updateOnTheMoveTimestampFlag;
+volatile uint32_t rtcAlarmTickCount;
+volatile uint32_t onTheMoveInterruptCount;
 
 static uint8_t lastResetCause;
 static bool isGpsInitialized;
 static bool isGpsInPowerSaveMode;
+static bool isOnTheMoveGnssConfigOverridden;
 static bool isRtcInitialized;
 static bool isDeviceInitialized;
 static bool isOnTheMoveInitialized;
+static bool isGpsFixInProgress;
+static bool isRtcWakeSecondCadence;
 static int64_t rtcEpochDelta; // set in setNow() and used in getGpsFixAndTransmit() for correcting time in loop
+static uint32_t rtcAlarmTargetEpoch;
+static uint32_t lastLoggedRtcAlarmTickCount;
+static uint32_t lastLoggedOnTheMoveInterruptCount;
+
+enum GpsFixTriggerSource {
+    GpsFixTrigger_None,
+    GpsFixTrigger_Startup,
+    GpsFixTrigger_Default,
+    GpsFixTrigger_Alternative,
+    GpsFixTrigger_OnTheMove
+};
+
+static GpsFixTriggerSource currentGpsFixTriggerSource;
+static uint8_t savedGnssConfig[64];
+static uint16_t savedGnssConfigLength;
 
 static uint8_t loraHWEui[8];
 static bool isLoraHWEuiInitialized;
@@ -175,6 +195,7 @@ bool initLora(LoraInitConsoleMessages messages, LoraInitJoin join);
 bool initGps();
 void initOnTheMove();
 void systemSleep();
+void syncOnTheMoveActivationTimestamp();
 void runDefaultFixEvent(uint32_t now);
 void runAlternativeFixEvent(uint32_t now);
 void runLoraModuleSleepExtendEvent(uint32_t now);
@@ -193,6 +214,15 @@ void setDevAddrOrEUItoHWEUI();
 void onConfigReset(void);
 void onOtaaJoinSuccess(void);
 void setupBOD33();
+const char* getGpsFixTriggerSourceName(GpsFixTriggerSource source);
+const char* getGpsPsmResultName(UBlox::PowerSaveModeResult result);
+uint32_t adjustTimestampByDelta(uint32_t timestamp, int64_t delta);
+uint32_t getOnTheMoveMotionAgeSeconds(uint32_t now, bool* isValid = NULL);
+bool isOnTheMoveWindowActive(uint32_t now);
+void updateRtcAlarmForSleep(uint32_t now);
+void debugPrintOnTheMoveState(const char* prefix, uint32_t now);
+bool prepareGnssForOnTheMovePsm();
+void restoreGnssConfigAfterOnTheMove();
 
 static void printCpuResetCause(Stream& stream);
 static void printBootUpMessage(Stream& stream);
@@ -301,7 +331,9 @@ void setup()
         CONSOLE_STREAM.end();
     }
 
+    currentGpsFixTriggerSource = GpsFixTrigger_Startup;
     bool startupFixSuccessful = getGpsFixAndTransmit();
+    currentGpsFixTriggerSource = GpsFixTrigger_None;
 
     // The startup fix can take as long as the configured fix interval,
     // which would make the first scheduled event fire immediately after boot.
@@ -323,9 +355,12 @@ void loop()
         LoRa.loopHandler();
     }
 
-    if (updateOnTheMoveTimestampFlag) {
-        lastOnTheMoveActivationTimestamp = getNow();
-        updateOnTheMoveTimestampFlag = false;
+    syncOnTheMoveActivationTimestamp();
+
+    if (!minuteFlag && isRtcWakeSecondCadence && rtcAlarmTargetEpoch != 0 && getNow() >= rtcAlarmTargetEpoch) {
+        minuteFlag = true;
+        rtcAlarmTickCount++;
+        rtcAlarmTargetEpoch = 0;
     }
 
     if (minuteFlag) {
@@ -333,12 +368,293 @@ void loop()
             setLedColor(BLUE);
         }
 
+        uint32_t rtcAlarmTicksBeforeUpdate = rtcAlarmTickCount;
+        debugPrint("RTC timer dispatch. pendingWakeTicks=");
+        debugPrint(rtcAlarmTicksBeforeUpdate - lastLoggedRtcAlarmTickCount);
+        debugPrint(" now=");
+        debugPrint(getNow());
+        debugPrintln("");
+
         timer.update(); // handle scheduled events
 
+        uint32_t rtcAlarmTicksAfterUpdate = rtcAlarmTickCount;
+        if (rtcAlarmTicksAfterUpdate != rtcAlarmTicksBeforeUpdate) {
+            debugPrint("Wake tick arrived during timer.update(). extraTicks=");
+            debugPrint(rtcAlarmTicksAfterUpdate - rtcAlarmTicksBeforeUpdate);
+            debugPrintln("");
+        }
+        lastLoggedRtcAlarmTickCount = rtcAlarmTicksAfterUpdate;
         minuteFlag = false;
     }
 
     systemSleep();
+}
+
+const char* getGpsFixTriggerSourceName(GpsFixTriggerSource source)
+{
+    switch (source) {
+    case GpsFixTrigger_Startup:
+        return "startup";
+    case GpsFixTrigger_Default:
+        return "default";
+    case GpsFixTrigger_Alternative:
+        return "alternative";
+    case GpsFixTrigger_OnTheMove:
+        return "on-the-move";
+    default:
+        return "unknown";
+    }
+}
+
+const char* getGpsPsmResultName(UBlox::PowerSaveModeResult result)
+{
+    switch (result) {
+    case UBlox::PowerSaveModeOk:
+        return "ok";
+    case UBlox::PowerSaveModePm2SendFailed:
+        return "pm2-send-failed";
+    case UBlox::PowerSaveModePm2Nak:
+        return "pm2-nak";
+    case UBlox::PowerSaveModePm2Timeout:
+        return "pm2-timeout";
+    case UBlox::PowerSaveModeRxmSendFailed:
+        return "rxm-send-failed";
+    case UBlox::PowerSaveModeRxmNak:
+        return "rxm-nak";
+    case UBlox::PowerSaveModeRxmTimeout:
+        return "rxm-timeout";
+    default:
+        return "unknown";
+    }
+}
+
+uint32_t adjustTimestampByDelta(uint32_t timestamp, int64_t delta)
+{
+    if (timestamp == 0) {
+        return 0;
+    }
+
+    int64_t adjustedTimestamp = (int64_t)timestamp + delta;
+    if (adjustedTimestamp < 0) {
+        return 0;
+    }
+    if (adjustedTimestamp > UINT32_MAX) {
+        return UINT32_MAX;
+    }
+
+    return (uint32_t)adjustedTimestamp;
+}
+
+uint32_t getOnTheMoveMotionAgeSeconds(uint32_t now, bool* isValid)
+{
+    bool hasMotionTimestamp = (isOnTheMoveActivated && lastOnTheMoveActivationTimestamp != 0);
+    if (isValid) {
+        *isValid = hasMotionTimestamp;
+    }
+
+    if (!hasMotionTimestamp) {
+        return 0;
+    }
+
+    if (now < lastOnTheMoveActivationTimestamp) {
+        return 0;
+    }
+
+    return now - lastOnTheMoveActivationTimestamp;
+}
+
+bool isOnTheMoveWindowActive(uint32_t now)
+{
+    if (!isOnTheMoveActivated) {
+        return false;
+    }
+
+    return (getOnTheMoveMotionAgeSeconds(now) < params.getOnTheMoveTimeout() * 60UL);
+}
+
+void updateRtcAlarmForSleep(uint32_t now)
+{
+    if (isOnTheMoveWindowActive(now)) {
+        if (rtcAlarmTargetEpoch == 0 || rtcAlarmTargetEpoch <= now) {
+            uint32_t nextWakeEpoch = now + 1;
+            tmx nextWakeTm;
+            time.localtime(nextWakeEpoch, &nextWakeTm);
+            rtc.setAlarmTime((uint8_t)nextWakeTm.tm_hour, (uint8_t)nextWakeTm.tm_min, (uint8_t)nextWakeTm.tm_sec);
+            rtc.enableAlarm(RTCZero::MATCH_HHMMSS);
+            rtcAlarmTargetEpoch = nextWakeEpoch;
+        }
+
+        if (!isRtcWakeSecondCadence) {
+            debugPrintln("RTC wake cadence -> 1 Hz (on-the-move active).");
+            isRtcWakeSecondCadence = true;
+        }
+
+        return;
+    }
+
+    if (isRtcWakeSecondCadence) {
+        rtc.setAlarmSeconds(59);
+        rtc.enableAlarm(RTCZero::MATCH_SS);
+        debugPrintln("RTC wake cadence -> 1/min (on-the-move inactive).");
+        isRtcWakeSecondCadence = false;
+    }
+    rtcAlarmTargetEpoch = 0;
+}
+
+void debugPrintOnTheMoveState(const char* prefix, uint32_t now)
+{
+    if (!params.getIsDebugOn()) {
+        return;
+    }
+
+    debugPrint(prefix);
+    debugPrint(" onTheMoveActive=");
+    debugPrint(isOnTheMoveActivated);
+    debugPrint(" gpsPsm=");
+    debugPrint(isGpsInPowerSaveMode);
+    debugPrint(" fixInProgress=");
+    debugPrint(isGpsFixInProgress);
+    debugPrint(" trigger=");
+    debugPrint(getGpsFixTriggerSourceName(currentGpsFixTriggerSource));
+    debugPrint(" irqCount=");
+    debugPrint(onTheMoveInterruptCount);
+    debugPrint(" motionAgeSec=");
+    bool hasMotionAge;
+    uint32_t motionAge = getOnTheMoveMotionAgeSeconds(now, &hasMotionAge);
+    if (hasMotionAge) {
+        debugPrint(motionAge);
+    }
+    else {
+        debugPrint("n/a");
+    }
+    debugPrintln("");
+}
+
+bool prepareGnssForOnTheMovePsm()
+{
+    if (isOnTheMoveGnssConfigOverridden) {
+        return true;
+    }
+
+    uint16_t gnssConfigLength = 0;
+    uint8_t gnssConfig[sizeof(savedGnssConfig)];
+    if (!ublox.getGnssConfiguration(gnssConfig, &gnssConfigLength, sizeof(gnssConfig))) {
+        debugPrintln("Unable to poll GNSS configuration for PSM fallback.");
+        return false;
+    }
+
+    if (gnssConfigLength < 4) {
+        debugPrintln("GNSS configuration payload too short.");
+        return false;
+    }
+
+    uint8_t numConfigBlocks = gnssConfig[3];
+    uint16_t expectedLength = 4 + ((uint16_t)numConfigBlocks * 8);
+    if (gnssConfigLength < expectedLength) {
+        debugPrintln("GNSS configuration payload length mismatch.");
+        return false;
+    }
+
+    memcpy(savedGnssConfig, gnssConfig, gnssConfigLength);
+    savedGnssConfigLength = gnssConfigLength;
+
+    bool gpsEnabled = false;
+    bool configChanged = false;
+    for (uint8_t blockIndex = 0; blockIndex < numConfigBlocks; blockIndex++) {
+        uint16_t blockOffset = 4 + ((uint16_t)blockIndex * 8);
+        uint8_t gnssId = gnssConfig[blockOffset];
+
+        uint32_t flags = (uint32_t)gnssConfig[blockOffset + 4]
+            | ((uint32_t)gnssConfig[blockOffset + 5] << 8)
+            | ((uint32_t)gnssConfig[blockOffset + 6] << 16)
+            | ((uint32_t)gnssConfig[blockOffset + 7] << 24);
+
+        bool isEnabled = ((flags & 0x00000001UL) != 0);
+        if (gnssId == 0) {
+            gpsEnabled = isEnabled;
+            if (!gpsEnabled) {
+                flags |= 0x00000001UL;
+                gnssConfig[blockOffset + 4] = (uint8_t)(flags & 0xFF);
+                gnssConfig[blockOffset + 5] = (uint8_t)((flags >> 8) & 0xFF);
+                gnssConfig[blockOffset + 6] = (uint8_t)((flags >> 16) & 0xFF);
+                gnssConfig[blockOffset + 7] = (uint8_t)((flags >> 24) & 0xFF);
+                gpsEnabled = true;
+                configChanged = true;
+            }
+            continue;
+        }
+
+        if (isEnabled) {
+            flags &= ~0x00000001UL;
+            gnssConfig[blockOffset + 4] = (uint8_t)(flags & 0xFF);
+            gnssConfig[blockOffset + 5] = (uint8_t)((flags >> 8) & 0xFF);
+            gnssConfig[blockOffset + 6] = (uint8_t)((flags >> 16) & 0xFF);
+            gnssConfig[blockOffset + 7] = (uint8_t)((flags >> 24) & 0xFF);
+            configChanged = true;
+        }
+    }
+
+    if (!gpsEnabled) {
+        debugPrintln("GNSS configuration has GPS disabled; cannot prepare PSM fallback.");
+        savedGnssConfigLength = 0;
+        return false;
+    }
+
+    if (!configChanged) {
+        debugPrintln("GNSS configuration already GPS-only for on-the-move PSM.");
+        savedGnssConfigLength = 0;
+        return false;
+    }
+
+    debugPrintln("Temporarily switching receiver to GPS-only for on-the-move PSM.");
+    if (!ublox.setGnssConfiguration(gnssConfig, gnssConfigLength)) {
+        debugPrintln("Failed to apply temporary GNSS configuration.");
+        savedGnssConfigLength = 0;
+        return false;
+    }
+
+    sodaq_wdt_safe_delay(500);
+
+    isOnTheMoveGnssConfigOverridden = configChanged;
+    return configChanged;
+}
+
+void restoreGnssConfigAfterOnTheMove()
+{
+    if (!isOnTheMoveGnssConfigOverridden || savedGnssConfigLength == 0) {
+        return;
+    }
+
+    debugPrintln("Restoring GNSS configuration after on-the-move.");
+    if (!ublox.setGnssConfiguration(savedGnssConfig, savedGnssConfigLength)) {
+        debugPrintln("Failed to restore GNSS configuration.");
+        return;
+    }
+
+    sodaq_wdt_safe_delay(500);
+    isOnTheMoveGnssConfigOverridden = false;
+    savedGnssConfigLength = 0;
+}
+
+void syncOnTheMoveActivationTimestamp()
+{
+    if (updateOnTheMoveTimestampFlag) {
+        lastOnTheMoveActivationTimestamp = getNow();
+        updateOnTheMoveTimestampFlag = false;
+
+        debugPrint("On-the-move timestamp synced. irqCount=");
+        debugPrint(onTheMoveInterruptCount);
+        debugPrint(" while ");
+        debugPrint(getGpsFixTriggerSourceName(currentGpsFixTriggerSource));
+        debugPrint(" fixInProgress=");
+        debugPrint(isGpsFixInProgress);
+        debugPrint(" at=");
+        debugPrint(lastOnTheMoveActivationTimestamp);
+        debugPrint(" previousIrqCount=");
+        debugPrint(lastLoggedOnTheMoveInterruptCount);
+        debugPrintln("");
+        lastLoggedOnTheMoveInterruptCount = onTheMoveInterruptCount;
+    }
 }
 
 /**
@@ -650,14 +966,20 @@ void systemSleep()
     LORA_STREAM.flush();
 
     setLedColor(NONE);
+    uint32_t now = getNow();
 
     // During on-the-move the GPS is kept in PSM cyclic tracking so it retains
     // ephemeris and can deliver a fast fix at the next wake.  When the mode ends
     // (isOnTheMoveActivated goes false) GPS is powered off normally.
-    if (!isOnTheMoveActivated) {
+    if (!isOnTheMoveWindowActive(now)) {
+        if (isGpsInPowerSaveMode) {
+            debugPrintln("On-the-move inactive during sleep; powering GPS off from PSM.");
+        }
         setGpsActive(false);
         isGpsInPowerSaveMode = false;
     }
+
+    updateRtcAlarmForSleep(now);
 
     // go to sleep, unless USB is used for debugging
     if (!params.getIsDebugOn() || ((long)&DEBUG_STREAM != (long)&SerialUSB)) {
@@ -715,10 +1037,19 @@ void setNow(uint32_t newEpoch)
     debugPrint(" to ");
     debugPrintln(newEpoch);
 
-    rtcEpochDelta = newEpoch - currentEpoch;
+    rtcEpochDelta = (int64_t)newEpoch - (int64_t)currentEpoch;
     rtc.setEpoch(newEpoch);
 
     timer.adjust(currentEpoch, newEpoch);
+    uint32_t adjustedOnTheMoveTimestamp = adjustTimestampByDelta(lastOnTheMoveActivationTimestamp, rtcEpochDelta);
+    if (adjustedOnTheMoveTimestamp != lastOnTheMoveActivationTimestamp) {
+        debugPrint("Adjusting on-the-move timestamp from ");
+        debugPrint(lastOnTheMoveActivationTimestamp);
+        debugPrint(" to ");
+        debugPrintln(adjustedOnTheMoveTimestamp);
+        lastOnTheMoveActivationTimestamp = adjustedOnTheMoveTimestamp;
+    }
+    rtcAlarmTargetEpoch = adjustTimestampByDelta(rtcAlarmTargetEpoch, rtcEpochDelta);
 
     isRtcInitialized = true;
 
@@ -765,6 +1096,7 @@ void initRtc()
 void rtcAlarmHandler()
 {
     minuteFlag = true;
+    rtcAlarmTickCount++;
 }
 
 /**
@@ -782,6 +1114,7 @@ void accelerometerInt1Handler()
 
         isOnTheMoveActivated = true;
         updateOnTheMoveTimestampFlag = true;
+        onTheMoveInterruptCount++;
     }
 }
 
@@ -854,9 +1187,17 @@ bool isCurrentTimeOfDayWithin(uint32_t daySecondsFrom, uint32_t daySecondsTo)
  */
 void runDefaultFixEvent(uint32_t now)
 {
+    if (isOnTheMoveWindowActive(getNow())) {
+        debugPrintln("==== Default fix skipped (on-the-move active) ====");
+        return;
+    }
+
     if (!isAlternativeFixEventApplicable()) {
-        debugPrintln("Default fix event started.");
+        currentGpsFixTriggerSource = GpsFixTrigger_Default;
+        debugPrintln("==== Default fix event started ====");
+        debugPrintOnTheMoveState("Default fix pre-state.", now);
         getGpsFixAndTransmit();
+        currentGpsFixTriggerSource = GpsFixTrigger_None;
     }
 }
 
@@ -865,9 +1206,17 @@ void runDefaultFixEvent(uint32_t now)
  */
 void runAlternativeFixEvent(uint32_t now)
 {
+    if (isOnTheMoveWindowActive(getNow())) {
+        debugPrintln("==== Alternative fix skipped (on-the-move active) ====");
+        return;
+    }
+
     if (isAlternativeFixEventApplicable()) {
-        debugPrintln("Alternative fix event started.");
+        currentGpsFixTriggerSource = GpsFixTrigger_Alternative;
+        debugPrintln("==== Alternative fix event started ====");
+        debugPrintOnTheMoveState("Alternative fix pre-state.", now);
         getGpsFixAndTransmit();
+        currentGpsFixTriggerSource = GpsFixTrigger_None;
     }
 }
 
@@ -876,17 +1225,26 @@ void runAlternativeFixEvent(uint32_t now)
 */
 void runOnTheMoveFixEvent(uint32_t now)
 {
+    syncOnTheMoveActivationTimestamp();
+    currentGpsFixTriggerSource = GpsFixTrigger_OnTheMove;
+    uint32_t effectiveNow = getNow();
+    debugPrintOnTheMoveState("On-the-move timer event.", effectiveNow);
+
     if (isOnTheMoveActivated) {
-        if (now - lastOnTheMoveActivationTimestamp < params.getOnTheMoveTimeout() * 60) {
-            debugPrintln("On-the-move fix event started.");
+        uint32_t motionAge = getOnTheMoveMotionAgeSeconds(effectiveNow);
+        if (motionAge < params.getOnTheMoveTimeout() * 60UL) {
+            debugPrintln("==== On-the-move fix event started ====");
             getGpsFixAndTransmit();
         }
         else {
             // timeout elapsed -disable it completely until there is another on-the-move interrupt triggered
             debugPrintln("On-the-move has timed-out (no movement) -disabling.");
+            debugPrintOnTheMoveState("On-the-move timeout state.", effectiveNow);
             isOnTheMoveActivated = false;
         }
     }
+
+    currentGpsFixTriggerSource = GpsFixTrigger_None;
 }
 
 /**
@@ -949,10 +1307,22 @@ void delegateNavPvt(NavigationPositionVelocityTimeSolution* NavPvt)
 bool getGpsFixAndTransmit()
 {
     sodaq_wdt_reset();
-    debugPrintln("Starting getGpsFixAndTransmit()...");
+    debugPrintln("---- Starting GPS fix/transmit ----");
+    syncOnTheMoveActivationTimestamp();
+    isGpsFixInProgress = true;
+    debugPrint("Fix trigger source=");
+    debugPrint(getGpsFixTriggerSourceName(currentGpsFixTriggerSource));
+    debugPrint(" now=");
+    debugPrint(getNow());
+    debugPrint(" onTheMoveActive=");
+    debugPrint(isOnTheMoveActivated);
+    debugPrint(" gpsPsm=");
+    debugPrint(isGpsInPowerSaveMode);
+    debugPrintln("");
 
     if (!isGpsInitialized) {
         debugPrintln("GPS is not initialized, exiting...");
+        isGpsFixInProgress = false;
 
         return false;
     }
@@ -962,11 +1332,17 @@ bool getGpsFixAndTransmit()
     // If GPS is in PSM from a previous on-the-move cycle, switch it back to
     // continuous mode before reconfiguring so it responds immediately.
     if (isOnTheMoveActivated && isGpsInPowerSaveMode) {
-        ublox.setContinuousMode();
+        debugPrintln("GPS is in on-the-move PSM; switching to continuous mode for fix.");
+        if (!ublox.setContinuousMode()) {
+            debugPrintln("GPS continuous-mode command failed; continuing with full reconfigure.");
+        }
         sodaq_wdt_safe_delay(100);
     }
-    debugPrintln("Calling setGpsActive(true)...");
     setGpsActive(true);
+
+    if (!isOnTheMoveActivated && isOnTheMoveGnssConfigOverridden) {
+        restoreGnssConfigAfterOnTheMove();
+    }
 
     pendingReportDataRecord.setSatelliteCount(0); // reset satellites to use them as a quality metric in the loop
     uint32_t startTime = getNow();
@@ -975,6 +1351,7 @@ bool getGpsFixAndTransmit()
         && (pendingReportDataRecord.getSatelliteCount() < params.getGpsMinSatelliteCount()))
     {
         sodaq_wdt_reset();
+        syncOnTheMoveActivationTimestamp();
         uint16_t bytes = ublox.available();
 
         if (bytes) {
@@ -992,23 +1369,41 @@ bool getGpsFixAndTransmit()
         }
     }
 
+    syncOnTheMoveActivationTimestamp();
+
     // During on-the-move: put GPS into PSM cyclic tracking so it keeps ephemeris
     // alive between fix events (saving ~16 mA vs continuous).
     // Only treat GPS as being in PSM when the receiver acknowledged both UBX
     // commands.  On failure, fall back to a full power-off so the next fix cycle
     // starts clean and battery drain is bounded.
     if (isOnTheMoveActivated) {
-        if (ublox.setPowerSaveMode(GPS_ON_THE_MOVE_PSM_PERIOD_MS)) {
+        bool psmConfigured = ublox.setPowerSaveMode(GPS_ON_THE_MOVE_PSM_PERIOD_MS);
+        if (!psmConfigured
+            && ublox.getLastPowerSaveModeResult() == UBlox::PowerSaveModeRxmNak
+            && prepareGnssForOnTheMovePsm())
+        {
+            debugPrintln("Retrying GPS PSM after temporary GPS-only reconfiguration.");
+            psmConfigured = ublox.setPowerSaveMode(GPS_ON_THE_MOVE_PSM_PERIOD_MS);
+            if (!psmConfigured) {
+                restoreGnssConfigAfterOnTheMove();
+            }
+        }
+
+        if (psmConfigured) {
             isGpsInPowerSaveMode = true;
+            debugPrintln("GPS entered on-the-move PSM.");
         }
         else {
-            debugPrintln("GPS PSM command failed; powering off.");
+            debugPrint("GPS PSM command failed (");
+            debugPrint(getGpsPsmResultName(ublox.getLastPowerSaveModeResult()));
+            debugPrintln("); powering off.");
             setGpsActive(false);
             isGpsInPowerSaveMode = false;
         }
     }
     else {
         setGpsActive(false);
+        isGpsInPowerSaveMode = false;
     }
 
     // populate all fields of the report record
@@ -1045,6 +1440,21 @@ bool getGpsFixAndTransmit()
 
     transmit();
 
+    debugPrint("---- Completed GPS fix/transmit ---- source=");
+    debugPrint(getGpsFixTriggerSourceName(currentGpsFixTriggerSource));
+    debugPrint(" success=");
+    debugPrint(isSuccessful);
+    debugPrint(" timeToFix=");
+    debugPrint(pendingReportDataRecord.getTimeToFix());
+    debugPrint(" satCount=");
+    debugPrint(pendingReportDataRecord.getSatelliteCount());
+    debugPrint(" onTheMoveActive=");
+    debugPrint(isOnTheMoveActivated);
+    debugPrint(" gpsPsm=");
+    debugPrint(isGpsInPowerSaveMode);
+    debugPrintln("");
+    isGpsFixInProgress = false;
+
     return isSuccessful;
 }
 
@@ -1056,18 +1466,14 @@ void setGpsActive(bool on)
     sodaq_wdt_reset();
 
     if (on) {
-        debugPrintln("setGpsActive(on): enter");
-        debugPrintln("setGpsActive(on): ublox.enable()");
         ublox.enable();
 
         sodaq_wdt_reset();
 
-        debugPrintln("setGpsActive(on): ublox.flush()");
         ublox.flush();
 
         sodaq_wdt_reset();
 
-        debugPrintln("setGpsActive(on): settle delay");
         sodaq_wdt_safe_delay(80);
 
         PortConfigurationDDC pcd;
@@ -1075,35 +1481,29 @@ void setGpsActive(bool on)
         uint8_t maxRetries = 6;
         int8_t retriesLeft;
 
-        debugPrintln("setGpsActive(on): getPortConfigurationDDC()");
         retriesLeft = maxRetries;
         while (!ublox.getPortConfigurationDDC(&pcd) && (retriesLeft-- > 0)) {
-            debugPrintln("Retrying ublox.getPortConfigurationDDC(&pcd)...");
             sodaq_wdt_safe_delay(15);
         }
         if (retriesLeft == -1) {
-            debugPrintln("ublox.getPortConfigurationDDC(&pcd) failed!");
+            debugPrintln("GPS DDC port read failed during activation.");
 
             return;
         }
 
         pcd.outProtoMask = 1; // Disable NMEA
-        debugPrintln("setGpsActive(on): setPortConfigurationDDC()");
         retriesLeft = maxRetries;
         while (!ublox.setPortConfigurationDDC(&pcd) && (retriesLeft-- > 0)) {
-            debugPrintln("Retrying ublox.setPortConfigurationDDC(&pcd)...");
             sodaq_wdt_safe_delay(15);
         }
         if (retriesLeft == -1) {
-            debugPrintln("ublox.setPortConfigurationDDC(&pcd) failed!");
+            debugPrintln("GPS DDC port write failed during activation.");
 
             return;
         }
 
-        debugPrintln("setGpsActive(on): CfgMsg(UBX_NAV_PVT, 1)");
         ublox.CfgMsg(UBX_NAV_PVT, 1); // Navigation Position Velocity TimeSolution
         ublox.funcNavPvt = delegateNavPvt;
-        debugPrintln("setGpsActive(on): ready");
     }
     else {
         ublox.disable();

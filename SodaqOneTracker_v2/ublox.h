@@ -114,6 +114,16 @@ enum Messages {
 class UBlox {
 
 public:
+    enum PowerSaveModeResult {
+        PowerSaveModeOk = 0,
+        PowerSaveModePm2SendFailed,
+        PowerSaveModePm2Nak,
+        PowerSaveModePm2Timeout,
+        PowerSaveModeRxmSendFailed,
+        PowerSaveModeRxmNak,
+        PowerSaveModeRxmTimeout
+    };
+
     // NavigationPositionVelocityTimeSolution *NavPvt;
     // TimePulseParameters *CfgTp;
     //
@@ -137,6 +147,9 @@ public:
     bool    exists() const;
     bool    setPowerSaveMode(uint32_t updatePeriodMs);
     bool    setContinuousMode();
+    bool    getGnssConfiguration(uint8_t* buffer, uint16_t* length, uint16_t maxLength);
+    bool    setGnssConfiguration(const uint8_t* buffer, uint16_t length);
+    PowerSaveModeResult getLastPowerSaveModeResult() const { return _lastPowerSaveModeResult; }
 
     // function pointers
     void    (*funcNavPvt) (NavigationPositionVelocityTimeSolution*) = NULL;
@@ -150,6 +163,8 @@ public:
 private:
     int     send(uint8_t *buffer,int n);
     int     wait();
+    int     waitForAck(uint16_t ackedId, uint32_t timeoutMs = 200);
+    bool    waitForMessage(uint16_t id, uint8_t* buffer, uint16_t* length, uint16_t maxLength, uint32_t timeoutMs = 200);
     bool    wait(uint16_t rid,int reqLength,void *d);
     void 	dispatchMessage(int id);
     //
@@ -160,6 +175,7 @@ private:
     uint16_t    AckedId_;
     uint16_t    plLength_;
     uint16_t    Id_;
+    PowerSaveModeResult _lastPowerSaveModeResult = PowerSaveModeOk;
 
     struct payload{
         uint16_t length;
